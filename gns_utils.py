@@ -1,6 +1,7 @@
 __all__ = ['GradNorm', 'mean_loss_scale', 'EMA']
 
 import math
+import torch
 import numpy as np
 from dataclasses import dataclass, asdict
 from typing import Union
@@ -110,7 +111,7 @@ class EMA:
         return self.ema_sq_norm / (1 - self.beta_cumprod), self.ema_var / (1 - self.beta_cumprod)
 ### END MIT LICENSE ###
 
-def gnsify(sogns_results, minibatch_size):
+def gnsify(sogns_results, minibatch_size, ddp=False):
     # dictionary of approximate per-example gradient norms
     # convert to gns format
     # accumulate small and large squared gradient norms
@@ -119,6 +120,10 @@ def gnsify(sogns_results, minibatch_size):
     for _, v in sogns_results.items():
         total_small += v.peg_sqnorm
         total_big += v.g_sqnorm
+    if ddp:
+        # all_reduce AVG
+        torch.distributed.all_reduce(total_small, op=torch.distributed.ReduceOp.AVG)
+        torch.distributed.all_reduce(total_big, op=torch.distributed.ReduceOp.AVG)
     small = GradNorm(
         math.sqrt(total_small),
         mean_loss_scale(1, minibatch_size),

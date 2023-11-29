@@ -9,6 +9,11 @@ import torch
 
 from dataclasses import dataclass
 
+def is_any_nan_or_inf(tensor):
+    """
+    Check if any element of a tensor is NaN.
+    """
+    return torch.isnan(tensor).any() or torch.isinf(tensor).any()
 
 def add_sogns_hooks(module):
     """
@@ -25,12 +30,15 @@ def add_sogns_hooks(module):
         if a.ndim == 2:
             _, i = a.shape
             l = 1
+            a = a.unsqueeze(1)
         elif a.ndim == 3:
             _, l, i = a.shape
         else:
             raise ValueError(f'Unsupported activation shape: {a.shape}')
         z = 1./(l * i)
-        module.a_sigma = (z * torch.einsum('b...i,b...i->b', a, a)).sqrt().unsqueeze(1)
+        a = z * a.float() # this is safer
+        module.a_sigma = torch.einsum('bli,bli->b', a, a).sqrt().unsqueeze(1)
+        # assert not is_any_nan_or_inf(module.a_sigma)
         module.activation_dim = i
 
     class TensorHook:
@@ -41,6 +49,8 @@ def add_sogns_hooks(module):
             """
             Backward hook to compute the gradient noise scale.
             """
+            grad = grad.float()
+            # assert not is_any_nan_or_inf(grad)
             if grad.ndim == 2:
                 grad = grad.unsqueeze(1)
             # comput squared per-example batch gradient contribution
@@ -51,8 +61,9 @@ def add_sogns_hooks(module):
                 bias_g_sqnorm += (grad.sum(0)**2).sum() # scalar
             i = self.module.activation_dim
             w_tilde = math.sqrt(i) * self.module.a_sigma * grad.sum(1)
-            self.module.peg_sqnorm = (torch.sum(w_tilde**2, 1).mean() + bias_s).item()
-            self.module.g_sqnorm = (torch.sum(w_tilde.sum(0)**2) + bias_g_sqnorm).item()
+            # assert not is_any_nan_or_inf(w_tilde)
+            self.module.peg_sqnorm = (torch.sum(w_tilde**2, 1).mean() + bias_s)
+            self.module.g_sqnorm = (torch.sum(w_tilde.sum(0)**2) + bias_g_sqnorm)
             # delete a_sigma to make sure our garbage is collected
             del self.module.a_sigma
 
@@ -90,13 +101,14 @@ def add_exact_hooks(module):
             """
             Backward hook to compute the gradient noise scale.
             """
-            a = self.module.input_activations
+            a = self.module.input_activations.float()
             if a.ndim == 2:
                 a = a.unsqueeze(1)
             if grad.ndim == 2:
                 g = grad.unsqueeze(1)
             else:
                 g = grad
+            g = g.float()
             # comput squared per-example batch gradient contribution
             bias_s = 0.
             bias_g_sqnorm = 0.
@@ -104,10 +116,10 @@ def add_exact_hooks(module):
                 bias_s += (g**2).sum(1).mean() # scalar
                 bias_g_sqnorm += (g.sum(0)**2).sum() # scalar
             s = torch.einsum('bmk,bnk,bml,bnl->b', a, a, g, g).mean()
-            module.peg_sqnorm =  (s + bias_s).item()
+            module.peg_sqnorm =  (s + bias_s)
             g_big = torch.einsum('bmk,bml->kl', a, g)
             self.module.g_sqnorm = (torch.sum(g_big**2)
-                                    + bias_g_sqnorm).item()
+                                    + bias_g_sqnorm)
             # delete a_sigma to make sure our garbage is collected
             del self.module.input_activations
 

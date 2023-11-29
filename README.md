@@ -3,7 +3,7 @@
 
 > GNS and approximate GNS on nanoGPT for replicating ["Efficient and Approximate Per-Example Gradient Norms for Gradient Noise Scale"][sogns].
 
-Currently should work with one GPU, not tested with multi-GPU yet.
+Tested on CPU and local DDP GPU.
 
 ## Install
 
@@ -33,6 +33,15 @@ python train.py config/train_shakespeare_char.py --device=cpu --compile=False --
 ```
 
 The original nanoGPT repository may be found [here](https://github.com/karpathy/nanoGPT).
+
+### GPU DDP
+
+The following 4 GPU config has been tested, but it should work the same on other
+DDP configs:
+
+```
+torchrun --standalone --nproc_per_node=4 train.py config/train_shakespeare_char_4gpu.py --gns_type=sogns --dtype=float16
+```
 
 ## Code details
 

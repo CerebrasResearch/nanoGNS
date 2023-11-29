@@ -313,7 +313,7 @@ while True:
         # backward pass, with gradient scaling if training in fp16
         scaler.scale(loss).backward()
         approx_gns_results = gather_hook_results(model)
-        gns_ema.update(*gns_utils.gnsify(approx_gns_results, batch_size))
+        gns_ema.update(*gns_utils.gnsify(approx_gns_results, batch_size, ddp=ddp))
     # clip the gradient
     if grad_clip != 0.0:
         scaler.unscale_(optimizer)
