@@ -1,9 +1,14 @@
 
 # nanoGNS
 
-> GNS and approximate GNS on nanoGPT for replicating ["Efficient and Approximate Per-Example Gradient Norms for Gradient Noise Scale"][sogns].
+> Reference implementation of efficient per-example GNS and approximate 
+> per-example GNS on nanoGPT for replicating 
+> ["Efficient and Approximate Per-Example Gradient Norms for Gradient Noise Scale"][sogns].
 
 Tested on CPU and local DDP GPU.
+
+Additional MNIST implementation and experiment can be found in 
+[this gist](https://gist.github.com/gaviag-cerebras/aa8050a2b4a2f327c83bc7b21f9e8b89).
 
 ## Install
 
