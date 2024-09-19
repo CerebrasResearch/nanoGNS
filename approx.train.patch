@@ -1,0 +1,85 @@
+diff --git a/karpathy_train.py b/train.py
+index 951bda9..6d54459 100644
+--- a/karpathy_train.py
++++ b/train.py
+@@ -28,6 +28,11 @@ from torch.nn.parallel import DistributedDataParallel as DDP
+ from torch.distributed import init_process_group, destroy_process_group
+ 
+ from model import GPTConfig, GPT
++from hook import (add_hooks_to_model, add_sogns_hooks,
++                  add_exact_hooks,  gather_hook_results)
++
++import gns_utils
++
+ 
+ # -----------------------------------------------------------------------------
+ # default config values designed to train a gpt2 (124M) on OpenWebText
+@@ -39,6 +44,7 @@ eval_iters = 200
+ eval_only = False # if True, script exits right after the first eval
+ always_save_checkpoint = True # if True, always save a checkpoint after each eval
+ init_from = 'scratch' # 'scratch' or 'resume' or 'gpt2*'
++gns_type = 'sogns' # 'sogns' or 'exact'
+ # wandb logging
+ wandb_log = False # disabled by default
+ wandb_project = 'owt'
+@@ -113,13 +119,10 @@ ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=
+ 
+ # poor man's data loader
+ data_dir = os.path.join('data', dataset)
++train_data = np.memmap(os.path.join(data_dir, 'train.bin'), dtype=np.uint16, mode='r')
++val_data = np.memmap(os.path.join(data_dir, 'val.bin'), dtype=np.uint16, mode='r')
+ def get_batch(split):
+-    # We recreate np.memmap every batch to avoid a memory leak, as per
+-    # https://stackoverflow.com/questions/45132940/numpy-memmap-memory-usage-want-to-iterate-once/61472122#61472122
+-    if split == 'train':
+-        data = np.memmap(os.path.join(data_dir, 'train.bin'), dtype=np.uint16, mode='r')
+-    else:
+-        data = np.memmap(os.path.join(data_dir, 'val.bin'), dtype=np.uint16, mode='r')
++    data = train_data if split == 'train' else val_data
+     ix = torch.randint(len(data) - block_size, (batch_size,))
+     x = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.int64)) for i in ix])
+     y = torch.stack([torch.from_numpy((data[i+1:i+1+block_size]).astype(np.int64)) for i in ix])
+@@ -155,6 +158,11 @@ if init_from == 'scratch':
+     model_args['vocab_size'] = meta_vocab_size if meta_vocab_size is not None else 50304
+     gptconf = GPTConfig(**model_args)
+     model = GPT(gptconf)
++    if gns_type == 'sogns':
++        add_hooks_to_model(model, add_sogns_hooks)
++    elif gns_type == 'exact':
++        add_hooks_to_model(model, add_exact_hooks)
++    gns_ema = gns_utils.EMA(beta=0.9)
+ elif init_from == 'resume':
+     print(f"Resuming training from {out_dir}")
+     # resume training from a checkpoint.
+@@ -262,7 +270,8 @@ while True:
+     # evaluate the loss on train/val sets and write checkpoints
+     if iter_num % eval_interval == 0 and master_process:
+         losses = estimate_loss()
+-        print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
++        gns = gns_ema.get_gns()
++        print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}, gns {gns:.2f}")
+         if wandb_log:
+             wandb.log({
+                 "iter": iter_num,
+@@ -303,6 +312,8 @@ while True:
+         X, Y = get_batch('train')
+         # backward pass, with gradient scaling if training in fp16
+         scaler.scale(loss).backward()
++        approx_gns_results = gather_hook_results(model)
++        gns_ema.update(*gns_utils.gnsify(approx_gns_results, batch_size, ddp=ddp))
+     # clip the gradient
+     if grad_clip != 0.0:
+         scaler.unscale_(optimizer)
+@@ -324,7 +335,11 @@ while True:
+         if local_iter_num >= 5: # let the training loop settle a bit
+             mfu = raw_model.estimate_mfu(batch_size * gradient_accumulation_steps, dt)
+             running_mfu = mfu if running_mfu == -1.0 else 0.9*running_mfu + 0.1*mfu
+-        print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%")
++        gns = gns_ema.get_gns()
++        # if iter_num > 0:
++        #     ema_sq_norm, ema_var = gns_ema.get_stats()
++        print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%, gns {gns:.2f}")
++
+     iter_num += 1
+     local_iter_num += 1
+ 
