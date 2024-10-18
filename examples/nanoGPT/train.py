@@ -30,7 +30,7 @@ from torch.distributed import init_process_group, destroy_process_group
 import layer_config as lc
 from buffered import (PEGradNormShimLinear, PEGradNormShimEmbedding,
                       PEGradNormShimLayerNorm, PEGradNormLinear,
-                      PEGradNormEmbedding)
+                      PEGradNormEmbedding, zero_sqgradnorm_buffers)
 
 # -----------------------------------------------------------------------------
 # default config values designed to train a gpt2 (124M) on OpenWebText
@@ -242,6 +242,25 @@ if init_from == 'resume':
     optimizer.load_state_dict(checkpoint['optimizer'])
 checkpoint = None # free up memory
 
+# gns tracking
+class DoNothing: # class that does nothing, for when we don't want to track GNS
+    def __getattr__(self, name):
+        return lambda *args, **kwargs: {}
+tracked = linearclass != 'nn' or embeddingclass != 'nn' or lnclass != 'nn'
+if tracked and master_process:
+    gns_ema = gnstracking.GNS_EMA(alpha=0.95)
+    accumulate_gns = gnstracking.AccumulateMeasurements(prefix="train/gns/") # for logging
+    gns_tracker = gnstracking.GNSStatsTracker.from_model(
+        model,
+        callback=(gns_ema, accumulate_gns),
+        enforce_coverage=enforce_gns_coverage,
+        scaler=scaler if dtype == 'float16' else None,
+    )
+else:
+    gns_tracker = DoNothing()
+    gns_ema = DoNothing()
+    accumulate_gns = DoNothing()
+
 # compile the model
 if compile:
     print("compiling the model... (takes a ~minute)")
@@ -251,6 +270,14 @@ if compile:
 # wrap model into DDP container
 if ddp:
     model = DDP(model, device_ids=[ddp_local_rank])
+# gns tracking with DDP
+ddp_gns_enabled = tracked and ddp
+if ddp_gns_enabled:
+    ddp_gns_stats_hook = ddpgns.DDPGradientStatsHook(model)
+    ddp_gns_stats = ddpgns.GradientNoiseScale()
+else:
+    ddp_gns_stats = DoNothing()
+
 
 # helps estimate an arbitrarily accurate loss over either split using many batches
 @torch.no_grad()
@@ -267,6 +294,16 @@ def estimate_loss():
         out[split] = losses.mean()
     model.train()
     return out
+# function that interpolates this schedule
+def get_grad_accum_steps(tokens):
+    if bs_schedule:
+        with open(os.path.join(out_dir, 'grad_accum_schedule.txt'), 'r') as f:
+            grad_accum_tokens, grad_accum_steps = zip(*[map(float, line.strip().split(', ')) for line in f])
+        ga_steps = np.interp(tokens, grad_accum_tokens, grad_accum_steps)
+        ga_steps = math.ceil(ga_steps / ddp_world_size) # scale down to per-process
+        return ga_steps
+    else:
+        return gradient_accumulation_steps // ddp_world_size
 
 # learning rate decay scheduler (cosine with warmup)
 def get_lr(tokens):
@@ -282,9 +319,14 @@ def get_lr(tokens):
     return min_lr + coeff * (lr - min_lr)
 
 # logging
-if wandb_log and master_process:
+log = None
+if master_process:
+    if wandb_log:
     import wandb
-    wandb.init(project=wandb_project, name=wandb_run_name, config=config)
+    run = wandb.init(project=wandb_project, name=wandb_run_name, config=config)
+    def log(msg):
+        run.log({k:v for k,v in msg.items()})
+    tracker = LogWrapper(log, config=config, out_dir=out_dir) # wraps log function and writes csv
 
 # training loop
 X, Y = get_batch('train') # fetch the very first batch
@@ -292,25 +334,25 @@ t0 = time.time()
 local_iter_num = 0 # number of iterations in the lifetime of this process
 raw_model = model.module if ddp else model # unwrap DDP container if needed
 running_mfu = -1.0
+final_iter = False if not eval_only else True
 while True:
 
     # determine and set the learning rate for this iteration
     lr = get_lr(raw_model.tokens_processed.item()) if decay_lr else learning_rate
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
+    ga_steps = get_grad_accum_steps(raw_model.tokens_processed.item())
+    tokens_per_iter = ga_steps * ddp_world_size * batch_size * block_size
 
     # evaluate the loss on train/val sets and write checkpoints
-    if iter_num % eval_interval == 0 and master_process:
+    if (final_iter or iter_num % eval_interval) == 0 and master_process:
         losses = estimate_loss()
         print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
-        if wandb_log:
-            wandb.log({
-                "iter": iter_num,
-                "train/loss": losses['train'],
-                "val/loss": losses['val'],
-                "lr": lr,
-                "mfu": running_mfu*100, # convert to percentage
-            })
+        tracker.log({
+            "train/loss": losses['train'],
+            "val/loss": losses['val'],
+            "eval_iters": losses['eval_iters'],
+        })
         if losses['val'] < best_val_loss or always_save_checkpoint:
             best_val_loss = losses['val']
             if iter_num > 0:
@@ -324,33 +366,45 @@ while True:
                 }
                 print(f"saving checkpoint to {out_dir}")
                 torch.save(checkpoint, os.path.join(out_dir, 'ckpt.pt'))
-    if iter_num == 0 and eval_only:
+    if iter_num == 0 and (eval_only or final_iter):
         break
 
     # forward backward update, with optional gradient accumulation to simulate larger batch size
     # and using the GradScaler if data type is float16
-    for micro_step in range(gradient_accumulation_steps):
+    for micro_step in range(ga_steps):
         if ddp:
             # in DDP training we only need to sync gradients at the last micro step.
             # the official way to do this is with model.no_sync() context manager, but
             # I really dislike that this bloats the code and forces us to repeat code
             # looking at the source of that context manager, it just toggles this variable
-            model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
+            model.require_backward_grad_sync = (micro_step == ga_steps - 1)
         with ctx:
             logits, loss = model(X, Y)
-            loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
+            loss = loss / ga_steps # scale the loss to account for gradient accumulation
         # immediately async prefetch next batch while model is doing the forward pass on the GPU
         X, Y = get_batch('train')
         # backward pass, with gradient scaling if training in fp16
         scaler.scale(loss).backward()
-
+    gns_tracker.step(batch_size=ga_steps * batch_size * ddp_world_size) # track gradient noise scaling
+    if tracked:
+        zero_sqgradnorm_buffers(raw_model)
     if master_process: # track number of tokens processed
         raw_model.tokens_processed.add_(tokens_per_iter)
 
     # clip the gradient
     if grad_clip != 0.0:
         scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+        parameters = [param for group in optimizer.param_groups for param in group['params']]
+        grad_norm = math.sqrt(sum(p.grad.norm().item()**2 for p in parameters))
+        torch.nn.utils.clip_grad_norm_(parameters, grad_clip)
+    if ddp_gns_enabled:
+        sq_norm_small_batch = ddp_gns_stats_hook.get_stats()
+        sq_norm_large_batch = grad_norm**2
+        big_batch_size = X.shape[0] * ddp_world_size * ga_steps
+        small_batch_size = X.shape[0] * ga_steps
+        ddp_gns_stats.update(sq_norm_small_batch, sq_norm_large_batch, small_batch_size, big_batch_size)
+        ddp_gns_measurement = gnstracking.Measurement(sq_norm_large_batch**0.5, sq_norm_small_batch**0.5, big_batch_size, small_batch_size)
+
     # step the optimizer and scaler if training in fp16
     scaler.step(optimizer)
     scaler.update()
@@ -364,17 +418,46 @@ while True:
     if iter_num % log_interval == 0 and master_process:
         # get loss as float. note: this is a CPU-GPU sync point
         # scale up to undo the division above, approximating the true total loss (exact would have been a sum)
-        lossf = loss.item() * gradient_accumulation_steps
+        lossf = loss.item() * ga_steps
         if local_iter_num >= 5: # let the training loop settle a bit
-            mfu = raw_model.estimate_mfu(batch_size * gradient_accumulation_steps, dt)
+            mfu = raw_model.estimate_mfu(batch_size * ga_steps, dt)
             running_mfu = mfu if running_mfu == -1.0 else 0.9*running_mfu + 0.1*mfu
         print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%")
+        tracker.log({
+            "dt": dt,
+            "tokens_per_sec": tokens_per_iter / dt,
+            "mfu": 100*running_mfu if iter_num > 10 else 0.0,
+            "lr": lr,
+            "grad_norm": grad_norm,
+            "gradient_accumulation_steps": ga_steps,
+            "train/lossf": lossf,
+            **gns_ema.get_stats(prefix="train/"),
+        })
+        tracker.print(f"{iter_num=}: "+"{train_lossf=:.4f}, dt={dt:.3f}s, {mfu=:.2f}%, {tokens_per_sec=:,.0f}")
+        if ddp_gns_enabled:
+            tracker.log(ddp_gns_measurement.msg(prefix="ddp/"))
+            tracker.log(ddp_gns_stats.get_msg(prefix="ddp/"))
+    # this actually writes the logs to csv and calls logf (wandb or aim)
+    tracker.log({
+        **accumulate_gns.get_msg(),
+    })
+    if tracker.log_dict: # if we're going to log something, log the index vars
+        tracker.log({
+            "iter_num": iter_num,
+            "tokens_processed": raw_model.tokens_processed.item(),
+        })
+    tracker.step()
+
     iter_num += 1
     local_iter_num += 1
 
     # termination conditions
-    if iter_num > max_iters:
+    if final_iter:
         break
-
+    if iter_num > max_iters:
+        final_iter = True
+    if max_tokens is not None:
+        if raw_model.tokens_processed.item() > max_tokens:
+            final_iter = True
 if ddp:
     destroy_process_group()

@@ -49,6 +49,11 @@ class ModuleWithBuffers(nn.Module):
             if getattr(buffer, marker, False)
         }
 
+def zero_sqgradnorm_buffers(model):
+    for module in model.modules():
+        if hasattr(module, 'named_buffers_with_marker'):
+            for name, buffer in module.named_buffers_with_marker('is_pegsqnorm').items():
+                buffer.zero_()
 
 ############################## Linear ##############################
 
@@ -714,14 +719,7 @@ if __name__ == "__main__":
             assert torch.allclose(gns_linear.bias_pegsqnorm(), b_pegsqgradnorm)
         print(f"PEGradNormLinear test with bias={bias} passed")
 
-    def zero_sqgradnorm_buffers(model):
-        for module in model.modules():
-            if hasattr(module, 'named_buffers_with_marker'):
-                for name, buffer in module.named_buffers_with_marker('is_pegsqnorm').items():
-                    buffer.zero_()
-                    #print(f"zeroed {name=} {buffer=}")
-
-    def accumulate_sqgradnorm_buffers(model):
+   def accumulate_sqgradnorm_buffers(model):
         total = 0
         for m in model.modules():
             if hasattr(m, 'named_buffers_with_marker'):
