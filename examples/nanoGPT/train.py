@@ -27,7 +27,10 @@ import torch
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 
-from model import GPTConfig, GPT
+import layer_config as lc
+from buffered import (PEGradNormShimLinear, PEGradNormShimEmbedding,
+                      PEGradNormShimLayerNorm, PEGradNormLinear,
+                      PEGradNormEmbedding)
 
 # -----------------------------------------------------------------------------
 # default config values designed to train a gpt2 (124M) on OpenWebText
@@ -54,23 +57,28 @@ n_head = 12
 n_embd = 768
 dropout = 0.0 # for pretraining 0 is good, for finetuning try 0.1+
 bias = False # do we use bias inside LayerNorm and Linear layers?
+linearclass = 'nn' # gns:PEGradNormLinear or shim:PEGradNormShimLinear or nn:nn.Module
+embeddingclass = 'nn' # gns:PEGradNormEmbedding or shim:PEGradNormShimEmbedding or nn:nn.Embedding
+lnclass = 'nn' # shim:PEGradNormShimLayerNorm or nn:nn.LayerNorm
 # adamw optimizer
 learning_rate = 6e-4 # max learning rate
 max_iters = 600000 # total number of training iterations
+max_tokens = 15 * 10**12 # total number of tokens to process
 weight_decay = 1e-1
 beta1 = 0.9
 beta2 = 0.95
 grad_clip = 1.0 # clip gradients at this value, or disable if == 0.0
 # learning rate decay settings
 decay_lr = True # whether to decay the learning rate
-warmup_iters = 2000 # how many steps to warm up for
-lr_decay_iters = 600000 # should be ~= max_iters per Chinchilla
+warmup_tokens = 4000 * 12 * 5 * 8 * 1024 # 4000 steps for 12 * 5 * 8 batch size and 1024 block size
+lr_decay_tokens = 60000 * 12 * 5 * 8 * 1024 # 60000 steps for 12 * 5 * 8 batch size and 1024 block size
 min_lr = 6e-5 # minimum learning rate, should be ~= learning_rate/10 per Chinchilla
 # DDP settings
 backend = 'nccl' # 'nccl', 'gloo', etc.
 # system
 device = 'cuda' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
 dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
+fp32_attention_layers=[] # list of layer indices to run in float32
 compile = True # use PyTorch 2.0 to compile the model to be faster
 # -----------------------------------------------------------------------------
 config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
@@ -144,53 +152,86 @@ if os.path.exists(meta_path):
     print(f"found vocab_size = {meta_vocab_size} (inside {meta_path})")
 
 # model init
-model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=block_size,
-                  bias=bias, vocab_size=None, dropout=dropout) # start with model_args from command line
-if init_from == 'scratch':
-    # init a new model from scratch
-    print("Initializing a new model from scratch")
-    # determine the vocab size we'll use for from-scratch training
-    if meta_vocab_size is None:
-        print("defaulting to vocab_size of GPT-2 to 50304 (50257 rounded up for efficiency)")
-    model_args['vocab_size'] = meta_vocab_size if meta_vocab_size is not None else 50304
-    gptconf = GPTConfig(**model_args)
-    model = GPT(gptconf)
-elif init_from == 'resume':
-    print(f"Resuming training from {out_dir}")
-    # resume training from a checkpoint.
-    ckpt_path = os.path.join(out_dir, 'ckpt.pt')
-    checkpoint = torch.load(ckpt_path, map_location=device)
-    checkpoint_model_args = checkpoint['model_args']
-    # force these config attributes to be equal otherwise we can't even resume training
-    # the rest of the attributes (e.g. dropout) can stay as desired from command line
-    for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size']:
-        model_args[k] = checkpoint_model_args[k]
-    # create the model
-    gptconf = GPTConfig(**model_args)
-    model = GPT(gptconf)
-    state_dict = checkpoint['model']
-    # fix the keys of the state dictionary :(
-    # honestly no idea how checkpoints sometimes get this prefix, have to debug more
-    unwanted_prefix = '_orig_mod.'
-    for k,v in list(state_dict.items()):
-        if k.startswith(unwanted_prefix):
-            state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
-    model.load_state_dict(state_dict)
-    iter_num = checkpoint['iter_num']
-    best_val_loss = checkpoint['best_val_loss']
-elif init_from.startswith('gpt2'):
-    print(f"Initializing from OpenAI GPT-2 weights: {init_from}")
-    # initialize from OpenAI GPT-2 weights
-    override_args = dict(dropout=dropout)
-    model = GPT.from_pretrained(init_from, override_args)
-    # read off the created config params, so we can store them into checkpoint correctly
-    for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size']:
-        model_args[k] = getattr(model.config, k)
+model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd,
+                  block_size=block_size, bias=bias, vocab_size=None,
+                  dropout=dropout) # start with model_args from command line
+# parsing the layer classes from the config
+Linear = {'gns': PEGradNormLinear, 'nn': torch.nn.Linear,
+          'shim': PEGradNormShimLinear}[linearclass]
+Embedding = {'gns': PEGradNormEmbedding, 'nn': torch.nn.Embedding,
+             'shim': PEGradNormShimEmbedding}[embeddingclass]
+LayerNorm = {'shim': PEGradNormShimLayerNorm, 'nn': torch.nn.LayerNorm}[lnclass]
+with lc.set_contextual_config(TopLevel=TopLevel, Linear=Linear,
+                              Embedding=Embedding, LayerNorm=LayerNorm):
+    # import must happen inside the context manager so the config is set
+    from model import GPTConfig, GPT
+    if init_from == 'scratch':
+        # init a new model from scratch
+        print("Initializing a new model from scratch")
+        # determine the vocab size we'll use for from-scratch training
+        if meta_vocab_size is None:
+            print("defaulting to vocab_size of GPT-2 to 50304 (50257 rounded up for efficiency)")
+        model_args['vocab_size'] = meta_vocab_size if meta_vocab_size is not None else 50304
+        gptconf = GPTConfig(**model_args)
+        model = GPT(gptconf)
+    elif init_from == 'resume':
+        print(f"Resuming training from {out_dir}")
+        # resume training from a checkpoint.
+        ckpt_path = os.path.join(out_dir, 'ckpt.pt')
+        checkpoint = torch.load(ckpt_path, map_location=device)
+        checkpoint_model_args = checkpoint['model_args']
+        # force these config attributes to be equal otherwise we can't even resume training
+        # the rest of the attributes (e.g. dropout) can stay as desired from command line
+        for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size']:
+            model_args[k] = checkpoint_model_args[k]
+        # create the model
+        gptconf = GPTConfig(**model_args)
+        model = GPT(gptconf)
+        state_dict = checkpoint['model']
+        # fix the keys of the state dictionary :(
+        # honestly no idea how checkpoints sometimes get this prefix, have to debug more
+        unwanted_prefix = '_orig_mod.'
+        for k,v in list(state_dict.items()):
+            if k.startswith(unwanted_prefix):
+                state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
+        model.load_state_dict(state_dict)
+        iter_num = checkpoint['iter_num']
+        best_val_loss = checkpoint['best_val_loss']
+    elif init_from.startswith('gpt2'):
+        print(f"Initializing from OpenAI GPT-2 weights: {init_from}")
+        # initialize from OpenAI GPT-2 weights
+        override_args = dict(dropout=dropout)
+        model = GPT.from_pretrained(init_from, override_args)
+        # read off the created config params, so we can store them into checkpoint correctly
+        for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size']:
+            model_args[k] = getattr(model.config, k)
+
+# add buffer to the model for the number of tokens processed
+model.register_buffer('tokens_processed', torch.tensor(0, dtype=torch.int64))
+
 # crop down the model block size if desired, using model surgery
 if block_size < model.config.block_size:
     model.crop_block_size(block_size)
     model_args['block_size'] = block_size # so that the checkpoint will have the right value
 model.to(device)
+
+# numerical stability monkey patch hack
+# see: <add link to report here>
+if fp32_attention_layers:
+    from functools import wraps
+    # make context manager for float32
+    def use_context(method):
+        @wraps(method)
+        def wrapper(self, x):
+            dtype = x.dtype
+            with self.ctx: # first argument is self
+                return method(x).to(dtype) # this is necessary because otherwise compile fails
+        return wrapper
+    for layer_idx in fp32_attention_layers:
+        attn = model.transformer.h[layer_idx].attn
+        attn.ctx = torch.amp.autocast(device_type=device_type, dtype=torch.float32)
+        attn.forward = use_context(attn.forward).__get__(attn)
+
 
 # initialize a GradScaler. If enabled=False scaler is a no-op
 scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
@@ -228,18 +269,17 @@ def estimate_loss():
     return out
 
 # learning rate decay scheduler (cosine with warmup)
-def get_lr(it):
-    # 1) linear warmup for warmup_iters steps
-    if it < warmup_iters:
-        return learning_rate * it / warmup_iters
-    # 2) if it > lr_decay_iters, return min learning rate
-    if it > lr_decay_iters:
+def get_lr(tokens):
+    # 1) linear warmup for warmup_tokens steps
+    if tokens < warmup_tokens:
+        return lr * tokens / warmup_tokens
+    # 2) if tokens > lr_decay_tokens, return min learning rate
+    if tokens > lr_decay_tokens:
         return min_lr
     # 3) in between, use cosine decay down to min learning rate
-    decay_ratio = (it - warmup_iters) / (lr_decay_iters - warmup_iters)
-    assert 0 <= decay_ratio <= 1
-    coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio)) # coeff ranges 0..1
-    return min_lr + coeff * (learning_rate - min_lr)
+    decay_ratio = (tokens - warmup_tokens) / (lr_decay_tokens - warmup_tokens)
+    coeff = 1.0 - decay_ratio
+    return min_lr + coeff * (lr - min_lr)
 
 # logging
 if wandb_log and master_process:
@@ -255,7 +295,7 @@ running_mfu = -1.0
 while True:
 
     # determine and set the learning rate for this iteration
-    lr = get_lr(iter_num) if decay_lr else learning_rate
+    lr = get_lr(raw_model.tokens_processed.item()) if decay_lr else learning_rate
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
 
@@ -303,6 +343,10 @@ while True:
         X, Y = get_batch('train')
         # backward pass, with gradient scaling if training in fp16
         scaler.scale(loss).backward()
+
+    if master_process: # track number of tokens processed
+        raw_model.tokens_processed.add_(tokens_per_iter)
+
     # clip the gradient
     if grad_clip != 0.0:
         scaler.unscale_(optimizer)
