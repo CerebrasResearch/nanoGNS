@@ -145,7 +145,7 @@ class LogWrapper:
         self.finalize_csv()
 
     def finalize_csv(self):
-        if self.is_finalized or not os.path.exists(self.csv_data_path):
+        if self.is_finalized or not os.path.exists(self.csv_header_path):
             return
 
         csv_final_path = os.path.join(self.out_dir, 'log.csv')

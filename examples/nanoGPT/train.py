@@ -29,8 +29,10 @@ from torch.distributed import init_process_group, destroy_process_group
 
 import layer_config as lc
 from buffered import (PEGradNormShimLinear, PEGradNormShimEmbedding,
-                      PEGradNormShimLayerNorm, PEGradNormLinear,
+                      PEGradNormSeparatedLayerNorm, PEGradNormLinear,
                       PEGradNormEmbedding, zero_sqgradnorm_buffers)
+import gnstracking
+from tracker import LogWrapper
 
 # -----------------------------------------------------------------------------
 # default config values designed to train a gpt2 (124M) on OpenWebText
@@ -59,7 +61,7 @@ dropout = 0.0 # for pretraining 0 is good, for finetuning try 0.1+
 bias = False # do we use bias inside LayerNorm and Linear layers?
 linearclass = 'nn' # gns:PEGradNormLinear or shim:PEGradNormShimLinear or nn:nn.Module
 embeddingclass = 'nn' # gns:PEGradNormEmbedding or shim:PEGradNormShimEmbedding or nn:nn.Embedding
-lnclass = 'nn' # shim:PEGradNormShimLayerNorm or nn:nn.LayerNorm
+lnclass = 'nn' # shim:PEGradNormSeparatedLayerNorm or nn:nn.LayerNorm
 # adamw optimizer
 learning_rate = 6e-4 # max learning rate
 max_iters = 600000 # total number of training iterations
@@ -68,6 +70,8 @@ weight_decay = 1e-1
 beta1 = 0.9
 beta2 = 0.95
 grad_clip = 1.0 # clip gradients at this value, or disable if == 0.0
+# batch size schedule
+bs_schedule = False # if True, use a linear schedule to final gradient accumulation steps
 # learning rate decay settings
 decay_lr = True # whether to decay the learning rate
 warmup_tokens = 4000 * 12 * 5 * 8 * 1024 # 4000 steps for 12 * 5 * 8 batch size and 1024 block size
@@ -77,6 +81,7 @@ min_lr = 6e-5 # minimum learning rate, should be ~= learning_rate/10 per Chinchi
 backend = 'nccl' # 'nccl', 'gloo', etc.
 # system
 device = 'cuda' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
+device_name = 'A100' # 'A100', 'A10' to use spec sheet FLOPs for MFU, or '*_eflops' for estimated FLOP ceilings
 dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
 fp32_attention_layers=[] # list of layer indices to run in float32
 compile = True # use PyTorch 2.0 to compile the model to be faster
@@ -154,15 +159,16 @@ if os.path.exists(meta_path):
 # model init
 model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd,
                   block_size=block_size, bias=bias, vocab_size=None,
-                  dropout=dropout) # start with model_args from command line
+                  dropout=dropout, device_name=device_name) # start with model_args from command line
 # parsing the layer classes from the config
 Linear = {'gns': PEGradNormLinear, 'nn': torch.nn.Linear,
           'shim': PEGradNormShimLinear}[linearclass]
 Embedding = {'gns': PEGradNormEmbedding, 'nn': torch.nn.Embedding,
              'shim': PEGradNormShimEmbedding}[embeddingclass]
-LayerNorm = {'shim': PEGradNormShimLayerNorm, 'nn': torch.nn.LayerNorm}[lnclass]
-with lc.set_contextual_config(TopLevel=TopLevel, Linear=Linear,
-                              Embedding=Embedding, LayerNorm=LayerNorm):
+LayerNorm = {'shim': PEGradNormSeparatedLayerNorm,
+             'nn': torch.nn.LayerNorm}[lnclass]
+with lc.set_contextual_config(Linear=Linear, Embedding=Embedding,
+                              LayerNorm=LayerNorm):
     # import must happen inside the context manager so the config is set
     from model import GPTConfig, GPT
     if init_from == 'scratch':
@@ -248,17 +254,14 @@ class DoNothing: # class that does nothing, for when we don't want to track GNS
         return lambda *args, **kwargs: {}
 tracked = linearclass != 'nn' or embeddingclass != 'nn' or lnclass != 'nn'
 if tracked and master_process:
-    gns_ema = gnstracking.GNS_EMA(alpha=0.95)
     accumulate_gns = gnstracking.AccumulateMeasurements(prefix="train/gns/") # for logging
-    gns_tracker = gnstracking.GNSStatsTracker.from_model(
+    gns_tracker = gnstracking.MeasurementTracker.from_model(
         model,
-        callback=(gns_ema, accumulate_gns),
-        enforce_coverage=enforce_gns_coverage,
+        callback=accumulate_gns,
         scaler=scaler if dtype == 'float16' else None,
     )
 else:
     gns_tracker = DoNothing()
-    gns_ema = DoNothing()
     accumulate_gns = DoNothing()
 
 # compile the model
@@ -307,6 +310,7 @@ def get_grad_accum_steps(tokens):
 
 # learning rate decay scheduler (cosine with warmup)
 def get_lr(tokens):
+    lr = learning_rate
     # 1) linear warmup for warmup_tokens steps
     if tokens < warmup_tokens:
         return lr * tokens / warmup_tokens
@@ -322,10 +326,10 @@ def get_lr(tokens):
 log = None
 if master_process:
     if wandb_log:
-    import wandb
-    run = wandb.init(project=wandb_project, name=wandb_run_name, config=config)
-    def log(msg):
-        run.log({k:v for k,v in msg.items()})
+        import wandb
+        run = wandb.init(project=wandb_project, name=wandb_run_name, config=config)
+        def log(msg):
+            run.log({k:v for k,v in msg.items()})
     tracker = LogWrapper(log, config=config, out_dir=out_dir) # wraps log function and writes csv
 
 # training loop
@@ -345,13 +349,13 @@ while True:
     tokens_per_iter = ga_steps * ddp_world_size * batch_size * block_size
 
     # evaluate the loss on train/val sets and write checkpoints
-    if (final_iter or iter_num % eval_interval) == 0 and master_process:
+    if False:
+    #if (final_iter or iter_num % eval_interval) == 0 and master_process:
         losses = estimate_loss()
         print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
         tracker.log({
             "train/loss": losses['train'],
             "val/loss": losses['val'],
-            "eval_iters": losses['eval_iters'],
         })
         if losses['val'] < best_val_loss or always_save_checkpoint:
             best_val_loss = losses['val']
@@ -422,7 +426,6 @@ while True:
         if local_iter_num >= 5: # let the training loop settle a bit
             mfu = raw_model.estimate_mfu(batch_size * ga_steps, dt)
             running_mfu = mfu if running_mfu == -1.0 else 0.9*running_mfu + 0.1*mfu
-        print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%")
         tracker.log({
             "dt": dt,
             "tokens_per_sec": tokens_per_iter / dt,
@@ -431,7 +434,6 @@ while True:
             "grad_norm": grad_norm,
             "gradient_accumulation_steps": ga_steps,
             "train/lossf": lossf,
-            **gns_ema.get_stats(prefix="train/"),
         })
         tracker.print(f"{iter_num=}: "+"{train_lossf=:.4f}, dt={dt:.3f}s, {mfu=:.2f}%, {tokens_per_sec=:,.0f}")
         if ddp_gns_enabled:

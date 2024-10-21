@@ -28,6 +28,9 @@ class ModuleWithBuffers(nn.Module):
         self.register_buffer(name, init_func())
         buffer = getattr(self, name)
         setattr(buffer, marker, True)
+        if not hasattr(self, 'marked_buffers'):
+            self.marked_buffers = {}
+        self.marked_buffers[name] = marker
 
 
     def register_upegsqnorm_buffer(self, name, marker="is_pegsqnorm"):
@@ -44,15 +47,22 @@ class ModuleWithBuffers(nn.Module):
 
     def named_buffers_with_marker(self, marker):
         """Gather all buffers marked with is_custom_buffer attribute."""
+        # unfortunately, this is necessary because the markers will be erased
+        # whenever the model is moved to a different device, which makes this
+        # a much less useful feature
+        for name, marker in self.marked_buffers.items():
+            setattr(getattr(self, name), marker, True)
         return {
             name: buffer for name, buffer in self.named_buffers()
             if getattr(buffer, marker, False)
         }
 
 def zero_sqgradnorm_buffers(model):
+    zeroed_buffers = False
     for module in model.modules():
         if hasattr(module, 'named_buffers_with_marker'):
             for name, buffer in module.named_buffers_with_marker('is_pegsqnorm').items():
+                zeroed_buffers = True
                 buffer.zero_()
 
 ############################## Linear ##############################
@@ -334,13 +344,15 @@ class ElementWiseAffine(nn.Module):
     def __init__(self, ndim, bias):
         super().__init__()
         self.weight = nn.Parameter(torch.ones(ndim))
-        self.bias = nn.Parameter(torch.zeros(ndim)) if bias else None
+        if bias:
+            self.bias = nn.Parameter(torch.zeros(ndim)) if bias else None
+        else:
+            self.register_buffer('bias', torch.zeros(ndim))
 
     def forward(self, input):
         castable = lambda x: x.view(*[1 for _ in range(x.dim())], -1)
         out = input * castable(self.weight)
-        if exists(bias):
-            out += castable(self.bias)
+        out += castable(self.bias)
         return out
 
 
@@ -719,7 +731,7 @@ if __name__ == "__main__":
             assert torch.allclose(gns_linear.bias_pegsqnorm(), b_pegsqgradnorm)
         print(f"PEGradNormLinear test with bias={bias} passed")
 
-   def accumulate_sqgradnorm_buffers(model):
+    def accumulate_sqgradnorm_buffers(model):
         total = 0
         for m in model.modules():
             if hasattr(m, 'named_buffers_with_marker'):

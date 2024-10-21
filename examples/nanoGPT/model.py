@@ -106,6 +106,7 @@ class GPTConfig:
     n_embd: int = 768
     dropout: float = 0.0
     bias: bool = True # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
+    device_name: str = 'A100' # 'A100', 'A10', 'M1', etc.
 
 class GPT(nn.Module):
 
@@ -290,7 +291,14 @@ class GPT(nn.Module):
         flops_per_iter = flops_per_fwdbwd * fwdbwd_per_iter
         # express our flops throughput as ratio of A100 bfloat16 peak flops
         flops_achieved = flops_per_iter * (1.0/dt) # per second
-        flops_promised = 312e12 # A100 GPU bfloat16 peak flops is 312 TFLOPS
+        flops_promised = {'A100': 312e12, # for spec ref table is:
+                          'A10':  125e12, # https://152334h.github.io/gpu-table/
+                          # empirical FLOP ceilings using:
+                          # https://gist.github.com/gaviag-cerebras/5dd1fa407077a3728acc622d33438621
+                          # transfers between devices more accurately
+                          'M1_eflops': 4.35e12,
+                          'A10_eflops': 69e12,
+                          }[cfg.device_name]
         mfu = flops_achieved / flops_promised
         return mfu
 

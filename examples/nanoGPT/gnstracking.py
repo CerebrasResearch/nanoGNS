@@ -38,28 +38,27 @@ class Measurement:
 
 def shared_weights(module):
     # detect shared parameters
-    all_params = [id(p) for p in module.only_parameters()]
+    all_params = [id(p) for p in module.parameters()]
     # detect repeated ids (this will pass because `.parameters()` doesn't return the same object twice)
     assert len(all_params) == len(list(set(all_params))), "Repeated parameter ids"
-    param_names = [n for n, p in module.only_named_parameters()]
+    param_names = [n for n, p in module.named_parameters()]
     shared_params = []
     for n, m in module.named_modules():
         if hasattr(m, "weight"):
             n = n + ".weight"
             if n not in param_names:
-                #print(f"Shared weight: {n}")
-                for n2, p in module.only_named_parameters():
+                for n2, p in module.named_parameters():
                     if p is getattr(m, "weight"):
-                        #print(f"  {n2}")
                         # this is a shared parameter, so it should be excluded from iteration
                         shared_params.append(p)
     return shared_params
 
 def named_parameters_and_buffers(module, enforce_coverage=False):
+    named_buffers = dict(module.named_buffers())
     for n, p in module.named_parameters():
         b = None
         try:
-            b = module._buffers[n+"_upegsqnorm"]
+            b = named_buffers[n+"_upegsqnorm"]
         except KeyError:
             pass
         if b is None:
@@ -103,7 +102,6 @@ class MeasurementTracker:
 
     @staticmethod
     def from_model(model, callback=None, enforce_coverage=False, scaler=None):
-        assert isinstance(model, TrackedModule), "model must be a TrackedModule"
         names, params_and_buffers, indexes = [], [], []
         module_name2index = {n: i for i, (n, m) in enumerate(model.named_modules())}
         for n, p, b in named_parameters_and_buffers(model, enforce_coverage=enforce_coverage):
@@ -112,7 +110,7 @@ class MeasurementTracker:
             mn = ".".join(n.split(".")[:-1])
             indexes.append(module_name2index[mn])
         shared_params = shared_weights(model)
-        return GNSStatsTracker(params_and_buffers, names=names,
+        return MeasurementTracker(params_and_buffers, names=names,
                             indexes=indexes, callback=callback, scaler=scaler,
                             shared_params=shared_params)
 
@@ -123,7 +121,7 @@ class MeasurementTracker:
             if self.scaler:
                 # correction due to grad scaling
                 current_scale = self.scaler.get_scale()
-                assert abs(current_scale-1.) > 1e-6, f"GNSStatsTracker.step MUST be called before scaler.step, current scale: {current_scale=}"
+                assert abs(current_scale-1.) > 1e-6, f"MeasurementTracker.step MUST be called before scaler.step, current scale: {current_scale=}"
                 b[0] /= (current_scale**2) # squared norms are scaled by the square of the scale
             # this appears to not be required, the grads are already summed
             norm = p.grad.float().norm().item() / current_scale
