@@ -62,6 +62,7 @@ bias = False # do we use bias inside LayerNorm and Linear layers?
 linearclass = 'nn' # gns:PEGradNormLinear or shim:PEGradNormShimLinear or nn:nn.Module
 embeddingclass = 'nn' # gns:PEGradNormEmbedding or shim:PEGradNormShimEmbedding or nn:nn.Embedding
 lnclass = 'nn' # shim:PEGradNormSeparatedLayerNorm or nn:nn.LayerNorm
+spectral_c_attn = -1 # -1: no spectral c attn, >= 0 layer index to apply spectral c attn
 # adamw optimizer
 learning_rate = 6e-4 # max learning rate
 max_iters = 600000 # total number of training iterations
@@ -159,7 +160,8 @@ if os.path.exists(meta_path):
 # model init
 model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd,
                   block_size=block_size, bias=bias, vocab_size=None,
-                  dropout=dropout, device_name=device_name) # start with model_args from command line
+                  dropout=dropout, device_name=device_name,
+                  spectral_c_attn=spectral_c_attn) # start with model_args from command line
 # parsing the layer classes from the config
 Linear = {'gns': PEGradNormLinear, 'nn': torch.nn.Linear,
           'shim': PEGradNormShimLinear}[linearclass]
@@ -297,6 +299,17 @@ def estimate_loss():
         out[split] = losses.mean()
     model.train()
     return out
+
+# batch size schedule
+# generate a piecewise linear schedule for gradient accumulation steps
+# written to disk so you can change it on the fly if you want
+if bs_schedule and master_process:
+    n_points = 10
+    grad_accum_tokens = np.linspace(0, max_tokens, n_points, dtype=np.int64)
+    grad_accum_steps = np.linspace(2, gradient_accumulation_steps, n_points, dtype=np.int64)
+    with open(os.path.join(out_dir, 'grad_accum_schedule.txt'), 'w') as f:
+        tokformat = lambda t: format(t, ',').replace(',', '_') # easier to read
+        f.write("\n".join(f"{tokformat(t)}, {s:.0f}" for t,s in zip(grad_accum_tokens, grad_accum_steps)))
 # function that interpolates this schedule
 def get_grad_accum_steps(tokens):
     if bs_schedule:
@@ -349,8 +362,7 @@ while True:
     tokens_per_iter = ga_steps * ddp_world_size * batch_size * block_size
 
     # evaluate the loss on train/val sets and write checkpoints
-    if False:
-    #if (final_iter or iter_num % eval_interval) == 0 and master_process:
+    if (final_iter or iter_num % eval_interval) == 0 and master_process:
         losses = estimate_loss()
         print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
         tracker.log({

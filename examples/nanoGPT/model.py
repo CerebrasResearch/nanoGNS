@@ -14,17 +14,45 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
+from torch.nn.utils.parametrizations import spectral_norm
 
 import layer_config as lc
 
 
+class FusedQKVLinear(nn.Module):
+    def __init__(self, in_features, out_features, bias=True):
+        super().__init__()
+        self.qkv = lc.config.Linear(in_features, out_features * 3, bias=bias)
+        self.n_embd = out_features
+
+    def forward(self, x):
+        return self.qkv(x).split(self.n_embd, dim=2)
+
+class SpectralNormQKV(nn.Module):
+    def __init__(self, in_features, out_features, bias=True):
+        super().__init__()
+        # self.qkv = spectral_norm(lc.config.Linear(in_features, out_features * 3, bias=bias))
+        self.q = spectral_norm(lc.config.Linear(in_features, out_features, bias=bias))
+        self.k = spectral_norm(lc.config.Linear(in_features, out_features, bias=bias))
+        self.v = spectral_norm(lc.config.Linear(in_features, out_features, bias=bias))
+        self.register_buffer("scale", torch.tensor(1.1))
+
+    def forward(self, x):
+        q = self.q(x) * self.scale
+        k = self.k(x) * self.scale
+        v = self.v(x) * self.scale
+        return q, k, v
+
 class CausalSelfAttention(nn.Module):
 
-    def __init__(self, config):
+    def __init__(self, config, block_idx):
         super().__init__()
         assert config.n_embd % config.n_head == 0
         # key, query, value projections for all heads, but in a batch
-        self.c_attn = lc.config.Linear(config.n_embd, 3 * config.n_embd, bias=config.bias)
+        if config.spectral_c_attn == block_idx:
+            self.c_attn = SpectralNormQKV(config.n_embd, config.n_embd, bias=config.bias)
+        else:
+            self.c_attn = FusedQKVLinear(config.n_embd, config.n_embd, bias=config.bias)
         # output projection
         self.c_proj = lc.config.Linear(config.n_embd, config.n_embd, bias=config.bias)
         # regularization
@@ -45,7 +73,7 @@ class CausalSelfAttention(nn.Module):
         B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
 
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
-        q, k, v  = self.c_attn(x).split(self.n_embd, dim=2)
+        q, k, v  = self.c_attn(x)
         k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
@@ -85,10 +113,10 @@ class MLP(nn.Module):
 
 class Block(nn.Module):
 
-    def __init__(self, config):
+    def __init__(self, config, block_idx):
         super().__init__()
         self.ln_1 = lc.config.LayerNorm(config.n_embd, bias=config.bias)
-        self.attn = CausalSelfAttention(config)
+        self.attn = CausalSelfAttention(config, block_idx)
         self.ln_2 = lc.config.LayerNorm(config.n_embd, bias=config.bias)
         self.mlp = MLP(config)
 
@@ -107,6 +135,7 @@ class GPTConfig:
     dropout: float = 0.0
     bias: bool = True # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
     device_name: str = 'A100' # 'A100', 'A10', 'M1', etc.
+    spectral_c_attn: int = -1 # negative disables, otherwise the block index to use spectral norm for c_attn
 
 class GPT(nn.Module):
 
@@ -120,7 +149,7 @@ class GPT(nn.Module):
             wte = lc.config.Embedding(config.vocab_size, config.n_embd),
             wpe = lc.config.Embedding(config.block_size, config.n_embd),
             drop = nn.Dropout(config.dropout),
-            h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
+            h = nn.ModuleList([Block(config, i) for i in range(config.n_layer)]),
             ln_f = lc.config.LayerNorm(config.n_embd, bias=config.bias),
         ))
         self.lm_head = lc.config.Linear(config.n_embd, config.vocab_size, bias=False)
