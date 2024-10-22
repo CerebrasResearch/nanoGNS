@@ -1,49 +1,18 @@
 import os
 import numpy as np
 import pandas as pd
-import tempfile
-from gnstracking import unbiased_stats
+from csv_tools import load_csv
 
-def load_csv(out_dir):
-    """
-    Load CSV data, handling both in-progress and completed runs.
-    For in-progress runs, concatenates header and data from temporary files.
-    For completed runs, loads the final CSV directly.
-    """
-    # Check for temporary files
-    header_path = os.path.join(out_dir, 'log_header.csv.tmp')
-    data_path = os.path.join(out_dir, 'log_data.csv.tmp')
-    final_path = os.path.join(out_dir, 'log.csv')
-
-    # If both temporary files exist, we're loading from an in-progress run
-    if os.path.exists(header_path) and os.path.exists(data_path):
-        print("Loading from in-progress run (temporary files)")
-        # Create temporary directory for concatenation
-        with tempfile.TemporaryDirectory() as temp_dir:
-            temp_csv = os.path.join(temp_dir, 'combined.csv')
-
-            # Concatenate header and data
-            with open(temp_csv, 'w') as outfile:
-                with open(header_path) as infile:
-                    outfile.write(infile.read())
-                with open(data_path) as infile:
-                    outfile.write(infile.read())
-
-            # Read the concatenated CSV
-            df = pd.read_csv(temp_csv)
-
-    # If final CSV exists, load it directly
-    elif os.path.exists(final_path):
-        print("Loading from completed run (final CSV)")
-        df = pd.read_csv(final_path)
-
-    else:
-        raise FileNotFoundError(
-            f"No valid CSV files found in {out_dir}. "
-            f"Expected either {final_path} or both {header_path} and {data_path}"
-        )
-
-    return df
+def unbiased_stats(sgn, spegn, b):
+    # eq A.2 p.17 of https://arxiv.org/abs/1812.06162
+    # with B_small = 1
+    # so equal to Bessel correction for sample variance
+    # sgn is the squared gradient norm
+    # spegn is the squared per example gradient norm
+    # b is batch size
+    gtg = (b * sgn - spegn) / (b - 1.)
+    trsigma = (spegn - sgn) / (1. - (1. / b))
+    return gtg, trsigma
 
 def get_aligned_columns(df, prefix='train/gns'):
     """Get aligned norm, pegn, and batch_size columns that match the prefix."""
