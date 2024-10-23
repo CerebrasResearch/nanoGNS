@@ -326,8 +326,7 @@ def get_grad_accum_steps(tokens):
     else:
        return gradient_accumulation_steps // ddp_world_size
 
-
-# learning rate decay scheduler (cosine with warmup)
+# learning rate decay scheduler (linear with warmup)
 def get_lr(tokens):
     lr = learning_rate
     # 1) linear warmup for warmup_tokens steps
