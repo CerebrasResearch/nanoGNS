@@ -62,7 +62,7 @@ bias = False # do we use bias inside LayerNorm and Linear layers?
 linearclass = 'nn' # gns:PEGradNormLinear or shim:PEGradNormShimLinear or nn:nn.Module
 embeddingclass = 'nn' # gns:PEGradNormEmbedding or shim:PEGradNormShimEmbedding or nn:nn.Embedding
 lnclass = 'nn' # shim:PEGradNormSeparatedLayerNorm or nn:nn.LayerNorm
-spectral_c_attn = -1 # -1: no spectral c attn, >= 0 layer index to apply spectral c attn
+spectral_c_attn = [] # block indexes to use spectralnorm on QKV projection
 # adamw optimizer
 learning_rate = 6e-4 # max learning rate
 max_iters = 600000 # total number of training iterations
@@ -224,22 +224,22 @@ if block_size < model.config.block_size:
 model.to(device)
 
 # numerical stability monkey patch hack
+# unfortunately, breaks compile at the moment
 # see: <add link to report here>
+# approx 2% reduction in MFU with one block using fp32
 if fp32_attention_layers:
     from functools import wraps
     # make context manager for float32
     def use_context(method):
         @wraps(method)
         def wrapper(self, x):
-            dtype = x.dtype
             with self.ctx: # first argument is self
-                return method(x).to(dtype) # this is necessary because otherwise compile fails
+                return method(x)
         return wrapper
     for layer_idx in fp32_attention_layers:
         attn = model.transformer.h[layer_idx].attn
         attn.ctx = torch.amp.autocast(device_type=device_type, dtype=torch.float32)
         attn.forward = use_context(attn.forward).__get__(attn)
-
 
 # initialize a GradScaler. If enabled=False scaler is a no-op
 scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
@@ -362,7 +362,7 @@ while True:
     tokens_per_iter = ga_steps * ddp_world_size * batch_size * block_size
 
     # evaluate the loss on train/val sets and write checkpoints
-    if (final_iter or iter_num % eval_interval) == 0 and master_process:
+    if (final_iter or (iter_num % eval_interval == 0)) and master_process:
         losses = estimate_loss()
         print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
         tracker.log({

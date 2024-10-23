@@ -9,7 +9,7 @@ https://github.com/huggingface/transformers/blob/main/src/transformers/models/gp
 
 import math
 import inspect
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
 import torch.nn as nn
@@ -49,7 +49,7 @@ class CausalSelfAttention(nn.Module):
         super().__init__()
         assert config.n_embd % config.n_head == 0
         # key, query, value projections for all heads, but in a batch
-        if config.spectral_c_attn == block_idx:
+        if block_idx in config.spectral_c_attn:
             self.c_attn = SpectralNormQKV(config.n_embd, config.n_embd, bias=config.bias)
         else:
             self.c_attn = FusedQKVLinear(config.n_embd, config.n_embd, bias=config.bias)
@@ -135,7 +135,7 @@ class GPTConfig:
     dropout: float = 0.0
     bias: bool = True # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
     device_name: str = 'A100' # 'A100', 'A10', 'M1', etc.
-    spectral_c_attn: int = -1 # negative disables, otherwise the block index to use spectral norm for c_attn
+    spectral_c_attn: list = field(default_factory=lambda: []) # which layers to use spectral norm in the attn layer
 
 class GPT(nn.Module):
 
