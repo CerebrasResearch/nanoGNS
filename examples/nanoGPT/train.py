@@ -306,20 +306,26 @@ def estimate_loss():
 if bs_schedule and master_process:
     n_points = 10
     grad_accum_tokens = np.linspace(0, max_tokens, n_points, dtype=np.int64)
-    grad_accum_steps = np.linspace(2, gradient_accumulation_steps, n_points, dtype=np.int64)
+    min_grad_accum_steps = math.ceil(24 / (batch_size * ddp_world_size))  # 24 is the smallest safe batch size for this experiment
+    min_grad_accum_steps = max(min_grad_accum_steps, 1) # make sure it's at least 1
+    min_grad_accum_steps = ddp_world_size * min_grad_accum_steps # scale up to per-process
+    grad_accum_steps = np.linspace(min_grad_accum_steps,
+                                   gradient_accumulation_steps+1,
+                                   n_points, dtype=np.int64)
     with open(os.path.join(out_dir, 'grad_accum_schedule.txt'), 'w') as f:
         tokformat = lambda t: format(t, ',').replace(',', '_') # easier to read
         f.write("\n".join(f"{tokformat(t)}, {s:.0f}" for t,s in zip(grad_accum_tokens, grad_accum_steps)))
 # function that interpolates this schedule
 def get_grad_accum_steps(tokens):
     if bs_schedule:
-        with open(os.path.join(out_dir, 'grad_accum_schedule.txt'), 'r') as f:
-            grad_accum_tokens, grad_accum_steps = zip(*[map(float, line.strip().split(', ')) for line in f])
-        ga_steps = np.interp(tokens, grad_accum_tokens, grad_accum_steps)
-        ga_steps = math.ceil(ga_steps / ddp_world_size) # scale down to per-process
-        return ga_steps
+       with open(os.path.join(out_dir, 'grad_accum_schedule.txt'), 'r') as f:
+           grad_accum_tokens, grad_accum_steps = zip(*[map(float, line.strip().split(', ')) for line in f])
+       ga_steps = np.interp(tokens, grad_accum_tokens, grad_accum_steps)
+       ga_steps = math.floor(ga_steps / ddp_world_size) # scale down to per-process
+       return ga_steps
     else:
-        return gradient_accumulation_steps // ddp_world_size
+       return gradient_accumulation_steps // ddp_world_size
+
 
 # learning rate decay scheduler (cosine with warmup)
 def get_lr(tokens):
