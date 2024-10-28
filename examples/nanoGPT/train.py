@@ -224,8 +224,8 @@ if block_size < model.config.block_size:
 model.to(device)
 
 # numerical stability monkey patch hack
-# unfortunately, breaks compile at the moment
-# see: <add link to report here>
+# in PyTorch 2.4.0 this breaks compile, so not a preferred option
+# see: https://gist.github.com/gaviag-cerebras/b77aef9de29e859a5e999a582d57f6a2
 # approx 2% reduction in MFU with one block using fp32
 if fp32_attention_layers:
     from functools import wraps
