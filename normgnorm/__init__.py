@@ -9,8 +9,8 @@ current_dir = Path(__file__).parent.resolve()
 normgnorm_cuda = load(
     name="normgnorm_cuda",
     sources=[
-        str(current_dir / Path("csrc/normgnorm.cu")),
-        str(current_dir / Path("csrc/normgnorm.cpp")),
+        str(current_dir / Path("csrc/normgnorm_cuda.cu")),
+        str(current_dir / Path("csrc/normgnorm_cuda.cpp")),
     ],
 )
 
@@ -21,6 +21,7 @@ class PEGLayerNorm(torch.autograd.Function):
         assert len(input.shape) == 3
         assert len(normalized_shape) == 1
         assert input.size(-1) == normalized_shape[0]
+
         input_shape = input.size()
         output, mean, rstd = layernorm_fwd(input.reshape(-1, normalized_shape[0]), weight, bias, eps)
         output = output.reshape(input_shape)
@@ -70,13 +71,16 @@ if __name__ == '__main__':
 
     x = torch.randn(4, 4096, 4096, requires_grad=True).cuda()
     weight = torch.randn(4096, requires_grad=True).cuda()
-    bias = torch.randn(4096, requires_grad=True).cuda()
+    bias = torch.zeros(4096, requires_grad=True).cuda()
     weight_pegsqnorm = torch.zeros(2, requires_grad=True).cuda()
     bias_pegsqnorm = torch.zeros(2, requires_grad=True).cuda()
 
     PEGLayerNorm.apply(x, weight, bias, weight_pegsqnorm, bias_pegsqnorm, [4096], 1e-5)
     import time
 
+    out_gt = F.layer_norm(x, [4096], weight=weight, bias=bias, eps=1e-5)
+    out_ours = PEGLayerNorm.apply(x, weight, bias, weight_pegsqnorm, bias_pegsqnorm, [4096], 1e-5)
+    assert torch.allclose(out_gt, out_ours, atol=1e-5, rtol=1e-5)
 
     min_dt = float('inf')
     sum_dt = 0
