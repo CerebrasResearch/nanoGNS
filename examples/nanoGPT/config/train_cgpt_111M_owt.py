@@ -2,7 +2,8 @@ out_dir = 'out-cgpt-openwebtext'
 dataset = 'openwebtext'
 wandb_run_name = 'cgpt_111M'
 # this is set for A10 GPUs, modify for other GPUs
-device_name = 'A10_eflops' # empirical FLOP ceiling for A10 GPU
+#device_name = 'A10_eflops' # empirical FLOP ceiling for A10 GPU
+device_name = 'A10' # datasheet FLOP ceiling for A10 GPU
 batch_size = 8
 block_size = 2048
 gradient_accumulation_steps = 15

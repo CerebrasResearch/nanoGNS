@@ -48,6 +48,7 @@ class CausalSelfAttention(nn.Module):
     def __init__(self, config, block_idx):
         super().__init__()
         assert config.n_embd % config.n_head == 0
+        self.use_cos_attn = block_idx in config.cos_attn
         # key, query, value projections for all heads, but in a batch
         if block_idx in config.spectral_c_attn:
             self.c_attn = SpectralNormQKV(config.n_embd, config.n_embd, bias=config.bias)
@@ -77,6 +78,10 @@ class CausalSelfAttention(nn.Module):
         k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+
+        if self.use_cos_attn:
+            q = F.normalize(q, p=2, dim=-1)
+            k = F.normalize(k, p=2, dim=-1)
 
         # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
         if self.flash:
@@ -136,6 +141,7 @@ class GPTConfig:
     bias: bool = True # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
     device_name: str = 'A100' # 'A100', 'A10', 'M1', etc.
     spectral_c_attn: list = field(default_factory=lambda: []) # which layers to use spectral norm in the attn layer
+    cos_attn: list = field(default_factory=lambda: []) # which layers to use cosine attn in the attn layer
 
 class GPT(nn.Module):
 

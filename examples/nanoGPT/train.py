@@ -63,6 +63,7 @@ linearclass = 'nn' # gns:PEGradNormLinear or shim:PEGradNormShimLinear or nn:nn.
 embeddingclass = 'nn' # gns:PEGradNormEmbedding or shim:PEGradNormShimEmbedding or nn:nn.Embedding
 lnclass = 'nn' # shim:PEGradNormSeparatedLayerNorm or nn:nn.LayerNorm
 spectral_c_attn = [] # block indexes to use spectralnorm on QKV projection
+cos_attn = [] # block indexes to use cosine attention
 # adamw optimizer
 learning_rate = 6e-4 # max learning rate
 max_iters = 600000 # total number of training iterations
@@ -161,7 +162,8 @@ if os.path.exists(meta_path):
 model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd,
                   block_size=block_size, bias=bias, vocab_size=None,
                   dropout=dropout, device_name=device_name,
-                  spectral_c_attn=spectral_c_attn) # start with model_args from command line
+                  spectral_c_attn=spectral_c_attn,
+                  cos_attn=cos_attn) # start with model_args from command line
 # parsing the layer classes from the config
 Linear = {'gns': PEGradNormLinear, 'nn': torch.nn.Linear,
           'shim': PEGradNormShimLinear}[linearclass]
@@ -296,7 +298,7 @@ def estimate_loss():
             with ctx:
                 logits, loss = model(X, Y)
             losses[k] = loss.item()
-        out[split] = losses.mean()
+        out[split] = losses.mean().item()
     model.train()
     return out
 
