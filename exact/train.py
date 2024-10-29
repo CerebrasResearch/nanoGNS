@@ -31,6 +31,7 @@ import layer_config as lc
 from buffered import (PEGradNormShimLinear, PEGradNormShimEmbedding,
                       PEGradNormSeparatedLayerNorm, PEGradNormLinear,
                       PEGradNormEmbedding, zero_sqgradnorm_buffers)
+from fused_gns import PEGradNormFusedLayerNorm
 import gnstracking
 from tracker import LogWrapper
 
@@ -61,7 +62,7 @@ dropout = 0.0 # for pretraining 0 is good, for finetuning try 0.1+
 bias = False # do we use bias inside LayerNorm and Linear layers?
 linearclass = 'nn' # gns:PEGradNormLinear or shim:PEGradNormShimLinear or nn:nn.Module
 embeddingclass = 'nn' # gns:PEGradNormEmbedding or shim:PEGradNormShimEmbedding or nn:nn.Embedding
-lnclass = 'nn' # shim:PEGradNormSeparatedLayerNorm or nn:nn.LayerNorm
+lnclass = 'nn' # shim:PEGradNormSeparatedLayerNorm or nn:nn.LayerNorm or fused:PEGradNormFusedLayerNorm
 spectral_c_attn = [] # block indexes to use spectralnorm on QKV projection
 cos_attn = [] # block indexes to use cosine attention
 # adamw optimizer
@@ -170,7 +171,8 @@ Linear = {'gns': PEGradNormLinear, 'nn': torch.nn.Linear,
 Embedding = {'gns': PEGradNormEmbedding, 'nn': torch.nn.Embedding,
              'shim': PEGradNormShimEmbedding}[embeddingclass]
 LayerNorm = {'shim': PEGradNormSeparatedLayerNorm,
-             'nn': torch.nn.LayerNorm}[lnclass]
+             'nn': torch.nn.LayerNorm,
+             'fused': PEGradNormFusedLayerNorm}[lnclass]
 with lc.set_contextual_config(Linear=Linear, Embedding=Embedding,
                               LayerNorm=LayerNorm):
     # import must happen inside the context manager so the config is set
