@@ -48,10 +48,10 @@ class PEGLayerNorm(torch.autograd.Function):
 
             weight_pegnorm = torch.norm(pe_grad_weight, p=2, dim=-1)
             bias_pegnorm = torch.norm(pe_grad_bias, p=2, dim=-1)
-            weight_pegsqnorm = (weight_pegnorm ** 2).sum(0)[None]
-            bias_pegsqnorm = (bias_pegnorm ** 2).sum(0)[None]
-            weight_pegsqnorm = torch.cat([weight_pegsqnorm, torch.ones_like(weight_pegsqnorm)], 0)
-            bias_pegsqnorm = torch.cat([bias_pegsqnorm, torch.ones_like(bias_pegsqnorm)], 0)
+            weight_pegsqnorm = weight_pegnorm ** 2
+            bias_pegsqnorm = bias_pegnorm ** 2
+            weight_pegsqnorm = torch.stack([weight_pegsqnorm, torch.ones_like(weight_pegsqnorm)], -1).sum(0)
+            bias_pegsqnorm = torch.stack([bias_pegsqnorm, torch.ones_like(bias_pegsqnorm)], -1).sum(0)
 
         pe_grad_weight.record_stream(s)
         pe_grad_bias.record_stream(s)

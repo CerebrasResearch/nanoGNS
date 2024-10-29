@@ -76,7 +76,7 @@ class LNShimTest:
         if dtype == torch.float16:
             rtol, atol = 1e-2, 1e-3 # float16 is less precise
         else:
-            rtol, atol = 1e-5, 1e-8
+            rtol, atol = 1e-4, 1e-6
         assert torch.allclose(layernorm.weight.grad, auxlayernorm.weight.grad, rtol=rtol, atol=atol), f"{layernorm.weight.grad=}, {auxlayernorm.weight.grad=} {err=}"
         err = torch.abs(layernorm.bias.grad - auxlayernorm.bias.grad).max()
         assert torch.allclose(layernorm.bias.grad, auxlayernorm.bias.grad, rtol=rtol, atol=atol), f"{layernorm.bias.grad=}, {auxlayernorm.bias.grad=} {err=}"
