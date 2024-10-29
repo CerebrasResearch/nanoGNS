@@ -1,19 +1,64 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from functools import partial
 
 import normgnorm
-from gnstracking import LayerNorm, TrackedLayerNorm
 
-# on a small network, this is about 2x slower than the original
-# should get better with larger networks as GEMM eats up the
-# overhead
-class PEGradNormFusedLayerNorm(TrackedLayerNorm):
+
+class ModuleWithBuffers(nn.Module):
+    def register_marked_buffer(self, name, init_func, marker):
+        self.register_buffer(name, init_func())
+        buffer = getattr(self, name)
+        setattr(buffer, marker, True)
+        if not hasattr(self, 'marked_buffers'):
+            self.marked_buffers = {}
+        self.marked_buffers[name] = marker
+
+
+    def register_upegsqnorm_buffer(self, name, marker="is_pegsqnorm"):
+        buffer_name = f"{name}_upegsqnorm"
+        self.register_marked_buffer(buffer_name,
+                                    lambda: torch.zeros(2),
+                                    marker)
+        # Add a method to the module for this buffer
+        setattr(self, f"{name}_pegsqnorm",
+                partial(self._to_pegsqnorm, buffer_name))
+
+    def _to_pegsqnorm(self, buffer_name):
+        return torch.prod(getattr(self, buffer_name))
+
+    def named_buffers_with_marker(self, marker):
+        """Gather all buffers marked with is_custom_buffer attribute."""
+        # unfortunately, this is necessary because the markers will be erased
+        # whenever the model is moved to a different device, which makes this
+        # a much less useful feature
+        for name, marker in self.marked_buffers.items():
+            setattr(getattr(self, name), marker, True)
+        return {
+            name: buffer for name, buffer in self.named_buffers()
+            if getattr(buffer, marker, False)
+        }
+
+class LayerNorm(nn.Module):
+    """ LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False """
+
+    def __init__(self, ndim, bias):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(ndim))
+        self.bias = nn.Parameter(torch.zeros(ndim)) if bias else None
+        self.normalized_shape = self.weight.shape
+        self.eps = 1e-5
+
+    def forward(self, input):
+        return F.layer_norm(input, self.normalized_shape, self.weight, self.bias, self.eps)
+
+class PEGradNormFusedLayerNorm(ModuleWithBuffers, LayerNorm):
     def __init__(self, ndim, bias):
         super(PEGradNormFusedLayerNorm, self).__init__(ndim, bias)
-        self.weight_upegsqnorm = nn.Parameter(torch.full((2,), torch.nan))
+        self.register_upegsqnorm_buffer('weight')
         if bias:
-            self.bias_upegsqnorm = nn.Parameter(torch.full((2,), torch.nan))
+            self.register_upegsqnorm_buffer('bias')
         else:
             self.bias_upegsqnorm = None
 
@@ -22,6 +67,7 @@ class PEGradNormFusedLayerNorm(TrackedLayerNorm):
                                  self.weight_upegsqnorm,
                                  self.bias_upegsqnorm,
                                  self.normalized_shape, self.eps)
+
 DIM = 10
 
 class LNShimTest:

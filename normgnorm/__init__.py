@@ -5,6 +5,9 @@ import torch
 from torch.nn import functional as F
 from torch.utils.cpp_extension import load
 
+def exists(x):
+    return x is not None
+
 current_dir = Path(__file__).parent.resolve()
 normgnorm_cuda = load(
     name="normgnorm_cuda",
@@ -17,7 +20,7 @@ normgnorm_cuda = load(
 
 class PEGLayerNorm(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, input, weight, bias, weight_pegsqnorm, bias_pegsqnorm, normalized_shape, eps):
+    def forward(ctx, input, weight, bias, weight_upegsqnorm, bias_upegsqnorm, normalized_shape, eps):
         assert len(input.shape) == 3
         assert len(normalized_shape) == 1
         assert input.size(-1) == normalized_shape[0]
@@ -27,12 +30,12 @@ class PEGLayerNorm(torch.autograd.Function):
         output = output.reshape(input_shape)
         mean = mean.reshape(input_shape[:-1])
         rstd = rstd.reshape(input_shape[:-1])
-        ctx.save_for_backward(input, weight, mean, rstd)
+        ctx.save_for_backward(input, weight, mean, rstd, weight_upegsqnorm, bias_upegsqnorm)
         return output
 
     @staticmethod
     def backward(ctx, grad_input):
-        input, weight, mean, rstd = ctx.saved_tensors
+        input, weight, mean, rstd, weight_upegsqnorm, bias_upegsqnorm = ctx.saved_tensors
 
         grad_output, pe_grad_weight, pe_grad_bias = layernorm_bwd(
             grad_input, input, weight, mean, rstd
@@ -50,13 +53,20 @@ class PEGLayerNorm(torch.autograd.Function):
             bias_pegnorm = torch.norm(pe_grad_bias, p=2, dim=-1)
             weight_pegsqnorm = weight_pegnorm ** 2
             bias_pegsqnorm = bias_pegnorm ** 2
-            weight_pegsqnorm = torch.stack([weight_pegsqnorm, torch.ones_like(weight_pegsqnorm)], -1).sum(0)
-            bias_pegsqnorm = torch.stack([bias_pegsqnorm, torch.ones_like(bias_pegsqnorm)], -1).sum(0)
+            _weight_upegsqnorm = torch.stack([weight_pegsqnorm, torch.ones_like(weight_pegsqnorm)], -1).sum(0)
+            _bias_upegsqnorm = torch.stack([bias_pegsqnorm, torch.ones_like(bias_pegsqnorm)], -1).sum(0)
 
         pe_grad_weight.record_stream(s)
         pe_grad_bias.record_stream(s)
 
-        return grad_output, grad_weight, grad_bias, weight_pegsqnorm, bias_pegsqnorm, None, None
+        # update buffers
+        if exists(weight_upegsqnorm):
+            weight_upegsqnorm.add_(_weight_upegsqnorm)
+        if exists(bias_upegsqnorm):
+            bias_upegsqnorm.add_(_bias_upegsqnorm)
+
+        #return grad_output, grad_weight, grad_bias, weight_pegsqnorm, bias_pegsqnorm, None, None
+        return grad_output, grad_weight, grad_bias, None, None, None, None
 
 
 def layernorm_fwd(x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor, eps: float) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
