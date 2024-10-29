@@ -30,7 +30,7 @@ class LNShimTest:
         self.input_state = input_l.state_dict()
         input_ln = LayerNorm(DIM, True) # input layernorm layer
         self.input_ln_state = input_ln.state_dict()
-    def __call__(self, dtype, LN):
+    def __call__(self, dtype, LN, B):
         # reset input state
         input_state = self.input_state.copy()
         input_state = {k: v.to(dtype) for k, v in input_state.items()}
@@ -54,7 +54,7 @@ class LNShimTest:
         auxlayernorm.bias.data = layernorm.bias.data
         auxlayernorm.cuda()
         # create some input
-        input = torch.randn(2, 5, DIM, requires_grad=True).to(dtype).cuda()
+        input = torch.randn(B, 5, DIM, requires_grad=True).to(dtype).cuda()
         auxinput = input.clone().detach().requires_grad_(True).to(dtype).cuda()
 
         # check output
@@ -91,17 +91,17 @@ class LNShimTest:
             # compute pegsqnorm manually
             weight_pegsqnorm = 0.
             bias_pegsqnorm = 0.
-            for i in range(2):
+            for i in range(B):
                 layernorm.weight.grad.zero_()
                 layernorm.bias.grad.zero_()
                 output = layernorm(input_l(input[[i]]))
                 output.backward(g[[i]])
                 weight_pegsqnorm += (layernorm.weight.grad**2).sum()
                 bias_pegsqnorm += (layernorm.bias.grad**2).sum()
-            weight_pegsqnorm /= 2
-            bias_pegsqnorm /= 2
-            weight_pegsqnorm *= 2**2
-            bias_pegsqnorm *= 2**2
+            weight_pegsqnorm /= B
+            bias_pegsqnorm /= B
+            weight_pegsqnorm *= B**2
+            bias_pegsqnorm *= B**2
             if dtype == torch.float16:
                 rtol, atol = 1e-3, 1e-3
             else:
@@ -127,5 +127,6 @@ if __name__ == "__main__":
     test = LNShimTest()
     for LN in [PEGradNormFusedLayerNorm]:
         for dtype in [torch.float16, torch.float32]:
-            test(dtype, LN)
+            for B in [2,3,4]:
+                test(dtype, LN, B)
 
