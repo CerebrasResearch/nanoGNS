@@ -22,6 +22,7 @@ n_head = 12
 n_embd = 768
 dropout = 0.0
 bias = True
+cos_attn = [1] # necessary for numerical stability (See Appendix C.2), results are unchanged
 # eval stuff
 eval_interval = 1000
 log_interval = 10
