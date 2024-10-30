@@ -49,12 +49,12 @@ existing training loop.
 
 ## nanoGPT diff
 
-To illustrate the changes required to integrate per-example gradient norm, here
-is a diff between the original `train.py` from nanoGPT and the modified version
-in this repository. Splitting it up for annotation, the first difference is the
-imports required, we need the alyers from `buffered.py` and `fused_gns.py`.
-The model import is also removed because it must be placed inside the context
-manager from `layer_config.py`:
+To illustrate the changes required to integrate simultaneous per-example
+gradient norms, here is a diff between the original `train.py` from nanoGPT and
+the modified version in this repository. Splitting it up for annotation, the
+first difference is the imports required, we need the layers from `buffered.py`
+and `fused_gns.py`. The model import is also removed because it must be placed
+inside the context manager from `layer_config.py`:
 
 ```diff
 @@ -27,7 +27,13 @@ import torch
@@ -270,13 +270,13 @@ versions support this feature. It ensures that the specified layers are run in
  scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
 ```
 
-The next change is to add the GNS tracking. These classes have the responsibility
-of keeping track of the buffers that are storing the per-example gradient norms
-in each layer. `gns_tracker` stores references to these buffers and gathers them
-during training when `.step` is called, which allows `accumulate_gns` to log the
-GNS statistics. These are later passed to the tracker for logging.
+The next change is to add the GNS tracking. These classes are responsible for
+keeping track of the buffers that store the per-example gradient norms in each
+layer. `gns_tracker` stores references to these buffers and gathers them during
+training when `.step` is called, which allows `accumulate_gns` to log the GNS
+statistics. These are later passed to the `tracker` for logging.
 
-When disabled, the `DoNothing` class does nothing, specifically it doesn't log
+When disabled, the `DoNothing` class does nothing. Specifically, it doesn't log
 anything and doesn't pass anything to the tracker.
 
 ```diff 
@@ -329,7 +329,7 @@ module. This is a slightly adapted version of [crowsonkb's DDP GNS tracking code
 ```
 
 This change ensures that we don't pass a torch tensor to the tracker, which
-nanoGPT should have done as well.
+nanoGPT gets away with not doing because `wandb` converts it to a float itself.
 
 ```diff
 @@ -223,28 +300,56 @@ def estimate_loss():
@@ -343,9 +343,9 @@ nanoGPT should have done as well.
 ```
 
 This code implements the batch size schedule for replicating the batch size
-schedule experiment in the paper. As noted in the comments, it writes a file
-to the output directory so that you can modify the schedule while the experiment
-is running by editing the file.
+schedule experiment in the paper. As noted in the comments, it writes the batch
+size schedule to a file in the output directory so you can modify the schedule
+while the experiment is running by editing the file.
 
 ```diff
 -# learning rate decay scheduler (cosine with warmup)
@@ -410,9 +410,9 @@ Next we need to modify the learning rate schedule in two ways:
 
 We wanted a way to make sure we always log the GNS metrics without having to
 rely on `wandb` so we added a `tracker` object that wraps the `wandb.log` or
-operates independently. It's a simple wrapper that logs to a CSV file. It's
-necessary because the GNS is best computed offline from measured statistics so
-the EMA parameters can be adjusted (this can be done using `gns-analysis.py`).
+operates independently. It's necessary because the GNS is best computed offline
+from measured statistics so the EMA parameters can be adjusted (this can be done
+using `gns-analysis.py`).
 
 ```diff
  # logging
@@ -491,10 +491,11 @@ We've defined a new variable `ga_steps` that is the dynamic gradient
 accumulation steps used for batch size scheduling.
 
 > [!IMPORTANT]
-> `gns_tracker.step` is called immediately after the backward pass. This gathers
+> `gns_tracker.step` is called immediately after all of the gradient
+> accumulation microbatches and after the final backward pass. This gathers
 > the per-example gradient norms stored in the buffers and triggers any callbacks
 > that are registered. It is important that this happens before gradient clipping
-> because that would affect the batch gradient norm logged.
+> because that would affect the full batch gradient norm logged.
 >
 > Immediately after that we zero the buffers manually. This is also necessary
 > otherwise on the next step the buffers would already store a per-example gradient
@@ -563,7 +564,7 @@ have been wrapped but we kept it the same as the original codebase.
 
 > [!WARNING]
 > `tracker.py` must call `tracker.step()` in order to log anything to the CSV file.
-> This is different from `wandb` so it might trip people up. I decided this
+> This is a change from `wandb` so it might trip people up. I decided this
 > would be more reliable and explicit (the same thing can be achieved with
 > `commit=False` in `wandb`).
 >
@@ -638,6 +639,12 @@ eval loop and then quit.
 +            final_iter = True
  if ddp:
      destroy_process_group()
+```
+
+## Bibtex
+
+```bibtex
+TODO (NeurIPS page doesn't exist yet)
 ```
 
 [nanogpt]: https://github.com/karpathy/nanoGPT
