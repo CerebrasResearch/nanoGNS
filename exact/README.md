@@ -71,7 +71,7 @@ manager from `layer_config.py`:
 +from tracker import LogWrapper
 ```
 
-Some configuration chagnes are required to select the layer type required. The
+Some configuration changes are required to select the layer type required. The
 remaining changes are for batch size scheduling. For example, `bs_schedule` and
 the changes made to denominate training in tokens instead of iterations:
 
@@ -567,7 +567,7 @@ have been wrapped but we kept it the same as the original codebase.
 > would be more reliable and explicit (the same thing can be achieved with
 > `commit=False` in `wandb`).
 >
-> Another dangerous difference is we use `tracker.print` as a shorthand to print
+> Another less dangerous difference is we use `tracker.print` as a shorthand to print
 > a status to the command line. `tracker.print` is effectively an f-string that
 > allows the user to print whatever is currently cached (ie will be logged when
 > `.step` is called next). It also uses a format string that's not real:
