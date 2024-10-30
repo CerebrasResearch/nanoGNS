@@ -336,7 +336,7 @@ def get_lr(tokens):
     # 2) if tokens > lr_decay_tokens, return min learning rate
     if tokens > lr_decay_tokens:
         return min_lr
-    # 3) in between, use cosine decay down to min learning rate
+    # 3) in between, use linear decay down to min learning rate
     decay_ratio = (tokens - warmup_tokens) / (lr_decay_tokens - warmup_tokens)
     coeff = 1.0 - decay_ratio
     return min_lr + coeff * (lr - min_lr)

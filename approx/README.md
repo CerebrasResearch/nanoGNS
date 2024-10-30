@@ -1,5 +1,5 @@
 
-# nanoGNS
+# Approximate Per-Example Gradient Norms for GNS
 
 > Reference implementation of efficient per-example GNS and approximate 
 > per-example GNS on nanoGPT for replicating 
