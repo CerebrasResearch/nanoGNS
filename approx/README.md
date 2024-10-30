@@ -12,6 +12,13 @@ Additional MNIST implementation and experiment can be found in
 
 ## Install
 
+To run the example, first clone the nanoGPT repository into the `examples`
+directory:
+
+```
+git clone https://github.com/karpathy/nanoGPT.git examples/nanoGPT
+```
+
 The install script will symlink `hook.py` and `gns_utils.py` into the
 `examples/nanoGPT` subdirectory.
 
