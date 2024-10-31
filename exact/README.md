@@ -2,7 +2,7 @@
 
 > Reference implementation of simultaneous per-example norm calculation and
 > replication of the experiments found in 
-> ["Normalization Layer Per-Example Gradients are Sufficient to Predict Gradient Noise Scale in Transformers"](https://neurips.cc/virtual/2024/poster/95128)
+> ["Normalization Layer Per-Example Gradients are Sufficient to Predict Gradient Noise Scale in Transformers"][paper]
 
 ## Setup
 
@@ -10,7 +10,136 @@ This repository is a fork of [nanoGPT][] with minimal changes to demonstrate
 how to integrate simultaneous per-example gradient norm calculation into an
 existing training loop.
 
+Requirements:
+
+- pytorch
+- numpy
+- datasets (for preparing OpenWebText)
+- tiktoken (for tokenizing OpenWebText)
+- tqdm (for progress bars when preparing OpenWebText)
+
+Optional:
+
+- transformers (for loading checkpoints)
+- pandas (for plotting metrics and analyzing GNS)
+- plotille (for plotting metrics on the command line)
+- wandb (for logging metrics to Weights & Biases)
+
+## quick start
+
+With per-example gradient norms we can compute the gradient noise scale (GNS)
+on anything, even tiny experiments like shakespeare-char. First, I'll go through
+how to run that experiment (it'll run on a laptop no problem). Skip to the next
+section to see how to run the experiment on OpenWebText from [the paper][paper].
+
+### Shakespeare character-level language model
+
+Prepare the dataset:
+```bash
+python data/shakespeare_char/prepare.py
+```
+To train the network with per-example gradient norms, the layer types must be
+selected. For example, on CPU, for complete per-example gradient norms:
+```bash
+python train.py config/train_shakespeare_char.py --device=cpu --linearclass=gns --embeddingclass=gns --lnclass=shim
+```
+While training you'll see the normal nanoGPT status bar:
+```
+step 0: train loss 4.2981, val loss 4.2948
+iter_num=0: train_lossf=4.2791, dt=160.034s, mfu=0.00%, tokens_per_sec=102
+iter_num=10: train_lossf=4.2741, dt=2.147s, mfu=0.00%, tokens_per_sec=7,630
+iter_num=20: train_lossf=4.2500, dt=2.101s, mfu=0.17%, tokens_per_sec=7,799
+iter_num=30: train_lossf=4.2200, dt=2.425s, mfu=0.17%, tokens_per_sec=6,757
+iter_num=40: train_lossf=4.1861, dt=2.350s, mfu=0.17%, tokens_per_sec=6,973
+iter_num=50: train_lossf=4.1403, dt=2.518s, mfu=0.17%, tokens_per_sec=6,507
+iter_num=60: train_lossf=4.0793, dt=2.232s, mfu=0.17%, tokens_per_sec=7,339
+iter_num=70: train_lossf=4.0098, dt=2.352s, mfu=0.17%, tokens_per_sec=6,965
+iter_num=80: train_lossf=3.9290, dt=2.691s, mfu=0.16%, tokens_per_sec=6,089
+iter_num=90: train_lossf=3.8537, dt=2.748s, mfu=0.16%, tokens_per_sec=5,963
+...
+```
+It doesn't include GNS because GNS is computed offline. To view GNS, run (this
+will only plot to the command line if `plotille` is installed):
+```bash
+python gns-analysis.py out-shakespeare-char --alpha 0.95
+```
+In addition to the plots, this will print the current GNS, example at iteration
+240:
+```
+...
+GNS Analysis Results:
+====================
+Final GNS: 21.9598
+Final G^TG (EMA): 0.9331
+Final tr(Σ) (EMA): 20.4898
+Average batch size: 64.0
+Total tokens processed: 4,096,000
+...
+```
+The GNS for this experiment is starts low and only begins to increase around 120
+iterations, which takes about 10 minutes on my laptop. If you have a Mac
+M1 series processor:
+```bash
+python train.py config/train_shakespeare_char.py --device=mps --compile=False --linearclass=gns --embeddingclass=gns --lnclass=shim --device_name=M1_eflops
+```
+I had to run with `compile=False` but this might be fixed in newer versions.
+`--device_name=M1_eflops` is a special flag that tells the script the device to
+use for MFU estimation. Other M series processors would have to be added to
+`model.py` using [this script to compute the estimated FLOP
+ceiling](https://gist.github.com/gaviag-cerebras/5dd1fa407077a3728acc622d33438621).
+The above command runs at about 30% MFU for 19k tokens/sec.
+
+### OpenWebText
+
+To prepare OpenWebText:
+```bash
+python data/openwebtext/prepare.py
+```
+
+Unlike the original nanoGPT repository, we wanted to demonstrate how this can
+monitor GNS on a single device, so the example code doesn't require DDP. It's
+still possible to run DDP using `torchrun` as the original nanoGPT repository
+but we won't cover that here.
+
+The experiment config is set up to run on a single A10 GPU but any single device
+that is large enough will work (set the `device_name` to get accurate MFU
+estimates though). To run the experiment with GNS collection on all layers:
+```bash
+python train.py config/train_cgpt_111M_owt.py --linearclass=gns --embeddingclass=gns --lnclass=shim
+```
+To run the experiment with GNS collection using the fused LayerNorm CUDA kernel:
+```bash
+python train.py config/train_cgpt_111M_owt.py --lnclass=fused 
+```
+Both will complete in less than 12 hours but the fused version is about 10%
+faster (the same as disabling these layers altogether). On H100 GPUs for
+a larger model, we have observed the difference to be more than 40%.
+
+To replicate the batch size schedule experiment from the paper, set
+`bs_schedule`. This defaults to a linear batch size schedule. As noted below,
+the schedule is written to a file in the output directory so you can modify it
+while the experiment is running, it will be loaded and applied on every step.
+```bash
+python train.py config/train_cgpt_111M_owt.py --bs_schedule=True
+```
+
+The notebook "Replicating Figures.ipynb" contains the code to replicate 
+figures from the paper. All of the graphs may be reproduced using the withe the
+following two experiments, a baseline experiment to gather GNS data:
+```bash
+python train.py config/train_cgpt_111M_owt.py --linearclass=gns --embeddingclass=gns --lnclass=shim
+```
+and a batch size schedule for the batch size schdule plots (gathering LayerNorm
+GNS for illustration):
+```bash
+python train.py config/train_cgpt_111M_owt.py --lnclass=fused --out_dir=out-cgpt-openwebtext-bs_schedule --bs_schedule=True
+```
+
 ## Map of the repository
+
+This map of the repository is a guide to the files and directories. Files are
+generally documented in line. The code should also be simple enough to read line
+by line.
 
 ```
 ├── train.py                      # main script for training, same interface as nanoGPT
@@ -648,3 +777,4 @@ TODO (NeurIPS page doesn't exist yet)
 ```
 
 [nanogpt]: https://github.com/karpathy/nanoGPT
+[paper]: https://neurips.cc/virtual/2024/poster/95128

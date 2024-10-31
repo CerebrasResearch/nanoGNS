@@ -220,12 +220,12 @@ if __name__ == "__main__":
     if not args.no_plots and plotille_installed:
         plot1, plot2, plot3 = create_plots(results)
 
-        print("\nTrace and G^TG over tokens:")
+        print("\nlog_10(Trace) and log_10(G^TG) over tokens:")
         print("===========================")
         print(plot1)
 
-        print("\nPhase Plot (Trace vs G^TG):")
-        print("===========================")
+        print("\nPhase Plot (log_10(Trace) vs log_10(G^TG)):")
+        print("===========================================")
         print(plot2)
 
         print("\nGNS over tokens:")

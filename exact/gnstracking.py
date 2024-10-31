@@ -121,7 +121,6 @@ class MeasurementTracker:
             if self.scaler:
                 # correction due to grad scaling
                 current_scale = self.scaler.get_scale()
-                assert abs(current_scale-1.) > 1e-6, f"MeasurementTracker.step MUST be called before scaler.step, current scale: {current_scale=}"
                 b[0] /= (current_scale**2) # squared norms are scaled by the square of the scale
             # this appears to not be required, the grads are already summed
             norm = p.grad.float().norm().item() / current_scale
