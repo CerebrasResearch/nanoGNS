@@ -314,7 +314,8 @@ def estimate_loss():
 # written to disk so you can change it on the fly if you want
 if bs_schedule and master_process:
     n_points = 10
-    grad_accum_steps = np.linspace(2, gradient_accumulation_steps, n_points, dtype=np.int64)
+    max_steps = gradient_accumulation_steps * ddp_world_size
+    grad_accum_steps = np.linspace(2, max_steps, n_points, dtype=np.int64)
     grad_accum_tokens = np.interp(grad_accum_steps,
                                   [grad_accum_steps[0], grad_accum_steps[-1]],
                                   [0, max_tokens]).astype(np.int64) # interpolate to prevent aliasing
@@ -330,7 +331,7 @@ def get_grad_accum_steps(tokens):
         ga_steps = math.ceil(ga_steps / ddp_world_size) # scale down to per-process
         return ga_steps
     else:
-        return gradient_accumulation_steps // ddp_world_size
+        return gradient_accumulation_steps
 
 # learning rate decay scheduler (linear with warmup)
 def get_lr(tokens):
