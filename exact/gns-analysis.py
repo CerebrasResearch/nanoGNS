@@ -226,7 +226,7 @@ if __name__ == "__main__":
     print(f"Final G^TG (EMA): {results['gtg_ema'].iloc[-1]:.4f}")
     print(f"Final tr(Σ) (EMA): {results['trsigma_ema'].iloc[-1]:.4f}")
     if 'ddp_gns' in results.columns:
-        print(f"Final DDP GNS: {results['ddp_gns'].iloc[-1]:.4f}")
+        print(f"Final DDP GNS: {results['ddp_gns'].dropna().iloc[-1]:.4f}")
     print(f"Average batch size: {results['batch_size'].mean():.1f}")
     print(f"Total tokens processed: {results['tokens_processed'].iloc[-1]:,}")
 
