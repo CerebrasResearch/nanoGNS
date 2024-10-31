@@ -31,7 +31,9 @@ import layer_config as lc
 from buffered import (PEGradNormShimLinear, PEGradNormShimEmbedding,
                       PEGradNormSeparatedLayerNorm, PEGradNormLinear,
                       PEGradNormEmbedding, zero_sqgradnorm_buffers)
-from fused_gns import PEGradNormFusedLayerNorm
+PEGradNormFusedLayerNorm = None
+if os.environ.get('CUDA_HOME', False):
+    from fused_gns import PEGradNormFusedLayerNorm
 import gnstracking
 from tracker import LogWrapper
 
