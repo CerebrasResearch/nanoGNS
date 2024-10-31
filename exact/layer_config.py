@@ -1,16 +1,42 @@
+"""
+Provides a context manager for managing global PyTorch module configurations in
+a safe and explicit way.
+
+This module offers a solution to the common deep learning pattern of using
+global variables for configuration, particularly when working with PyTorch
+modules. Instead of relying on mutable global state, it provides a context
+manager that temporarily modifies module configurations in a controlled scope.
+
+Key Features:
+    - Default configurations for common PyTorch modules (Embedding, Linear, LayerNorm)
+    - Ability to temporarily override module implementations within a specific context
+    - Minimal modification to existing model definitions
+
+Example:
+    >>> import torch.nn as nn
+    >>> from contextlib import contextmanager
+    >>>
+    >>> # Override with custom implementations in a specific context
+    >>> class CustomLinear(nn.Linear):
+    ...     pass
+    >>>
+    >>> with set_contextual_config(Linear=CustomLinear):
+    ...     import my_model  # Must import inside context
+    ...     model = my_model.MyModel()  # Uses CustomLinear instead of nn.Linear
+
+Note:
+    The module containing your model must be imported inside the context manager
+    for the configuration changes to take effect.
+"""
+
 from contextlib import contextmanager
 from collections import namedtuple
 import torch.nn as nn
-
-# For docs, see: http://internal.cerebras.aws/~gaviag/context_factory.html
-
 
 def init_contextual_config():
     global config
     EmptyConfig = namedtuple('DefaultConfig', ['Embedding', 'Linear', 'LayerNorm'])
     config = EmptyConfig(Embedding=nn.Embedding, Linear=nn.Linear, LayerNorm=nn.LayerNorm)
-    #config = {'Embedding': lc.config.Embedding}
-    #print("Setting up config", hash(config))
 
 init_contextual_config()
 
@@ -25,15 +51,7 @@ def set_contextual_config(**kwargs):
             kwargs[k] = getattr(config, k) # use the original value if not present
     ConfigClass = namedtuple('Config', kwargs.keys())
     config = ConfigClass(**kwargs)
-    #original_config = config.copy()
-    #for k, v in kwargs.items():
-    #    config[k] = v
-    #print(f"New config: {config} {hash(config)}")
     try:
         yield config
     finally:
         config = original_config
-        # for k in list(config.keys()):
-        #     del config[k]
-        # for k, v in original_config.items():
-        #     config[k] = v
