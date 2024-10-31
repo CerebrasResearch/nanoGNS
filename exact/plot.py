@@ -12,6 +12,7 @@ def plot_metric(df, metric, x_col='tokens_processed', log_y=False, log_x=False, 
     fig.height = height
     fig.color_mode = 'byte'
 
+    df = df[[x_col, metric]].dropna()
     x = df[x_col].values.astype(float)
     y = df[metric].values
 

@@ -24,6 +24,7 @@ from contextlib import nullcontext
 
 import numpy as np
 import torch
+torch._dynamo.config.optimize_ddp=False
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 
@@ -31,11 +32,13 @@ import layer_config as lc
 from buffered import (PEGradNormShimLinear, PEGradNormShimEmbedding,
                       PEGradNormSeparatedLayerNorm, PEGradNormLinear,
                       PEGradNormEmbedding, zero_sqgradnorm_buffers)
+import gnstracking
+import ddpgns
+from tracker import LogWrapper
+
 PEGradNormFusedLayerNorm = None
 if os.environ.get('CUDA_HOME', False):
     from fused_gns import PEGradNormFusedLayerNorm
-import gnstracking
-from tracker import LogWrapper
 
 # -----------------------------------------------------------------------------
 # default config values designed to train a gpt2 (124M) on OpenWebText
@@ -282,8 +285,8 @@ if compile:
 if ddp:
     model = DDP(model, device_ids=[ddp_local_rank])
 # gns tracking with DDP
-ddp_gns_enabled = tracked and ddp
-if ddp_gns_enabled:
+if ddp: # no way to disable this when ddp except editing the code
+    ddp_gns_enabled = True
     ddp_gns_stats_hook = ddpgns.DDPGradientStatsHook(model)
     ddp_gns_stats = ddpgns.GradientNoiseScale()
 else:
@@ -352,6 +355,8 @@ if master_process:
         def log(msg):
             run.log({k:v for k,v in msg.items()})
     tracker = LogWrapper(log, config=config, out_dir=out_dir) # wraps log function and writes csv
+else:
+    tracker = DoNothing()
 
 # training loop
 X, Y = get_batch('train') # fetch the very first batch

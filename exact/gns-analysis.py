@@ -88,20 +88,20 @@ def compute_total_norms(df, prefix='train/gns'):
 def create_plots(results, tokens_col='tokens_processed'):
     """Create three plotille figures for GNS analysis."""
     # Make results safe for plotting
-    results = results.fillna(0)
+    df = results.fillna(0)
 
     # Common plot settings
     width = 80
     height = 20
 
     # For truncating and plotting
-    results = results[results['tokens_processed'] <= 100_000_000]
+    # df = df[df['tokens_processed'] <= 100_000_000]
     # Prepare tokens x axis
-    tokens = results[tokens_col].astype(float)
+    tokens = df[tokens_col].astype(float)
 
     # Log the relevant columns while keeping tokens_processed
-    log_results = np.log10(results[['gtg_ema', 'trsigma_ema', 'gns']])
-    log_results['tokens_processed'] = results['tokens_processed']
+    log_results = np.log10(df[['gtg_ema', 'trsigma_ema', 'gns']])
+    log_results['tokens_processed'] = df['tokens_processed']
     log_results = log_results.fillna(0)
 
     # 1. Plot trace and gtg over tokens
@@ -133,19 +133,31 @@ def create_plots(results, tokens_col='tokens_processed'):
     fig3.width = width
     fig3.height = height
     fig3.set_x_limits(min_=tokens.min(), max_=tokens.max())
-    fig3.set_y_limits(min_=0, max_=results['gns'].max())
+
+    # Determine y-axis limits considering both GNS values if ddp_gns exists
+    max_gns = df['gns'].max()
+    if 'ddp_gns' in df.columns:
+        max_gns = max(max_gns, df['ddp_gns'].max())
+
+    fig3.set_y_limits(min_=0, max_=max_gns)
     fig3.color_mode = 'byte'
 
-    fig3.plot(results[tokens_col], results['gns'], lc=200, label='GNS')
+    fig3.plot(df[tokens_col], df['gns'], lc=200, label='GNS (estimated)')
+
+    # Add ddp/gns to the plot if it exists
+    if 'ddp_gns' in results.columns:
+        df = results[['tokens_processed', 'ddp_gns']].dropna()
+        fig3.plot(df[tokens_col], df['ddp_gns'], lc=100, label='GNS (ddp)')
+
     plot3 = fig3.show(legend=True)
 
     return plot1, plot2, plot3
 
-def compute_ema(series, alpha=0.95):
+def compute_ema(series, alpha=0.99):
     """Compute exponential moving average."""
     return series.ewm(alpha=1-alpha, adjust=False).mean()
 
-def analyze_gns(out_dir, alpha=0.95, prefix='train/gns'):
+def analyze_gns(out_dir, alpha=0.99, prefix='train/gns'):
     """Analyze GNS metrics using pandas and the unbiased estimator."""
     # Load data
     print(f"Loading data from {out_dir}")
@@ -187,6 +199,10 @@ def analyze_gns(out_dir, alpha=0.95, prefix='train/gns'):
         # If no tokens column, use step number * batch size as approximation
         results['tokens_processed'] = results['step'] * results['batch_size']
 
+    # Check for and add ddp/gns if it exists
+    if 'ddp/gns' in df.columns:
+        results['ddp_gns'] = df['ddp/gns']
+
     return results
 
 if __name__ == "__main__":
@@ -209,6 +225,8 @@ if __name__ == "__main__":
     print(f"Final GNS: {results['gns'].iloc[-1]:.4f}")
     print(f"Final G^TG (EMA): {results['gtg_ema'].iloc[-1]:.4f}")
     print(f"Final tr(Σ) (EMA): {results['trsigma_ema'].iloc[-1]:.4f}")
+    if 'ddp_gns' in results.columns:
+        print(f"Final DDP GNS: {results['ddp_gns'].iloc[-1]:.4f}")
     print(f"Average batch size: {results['batch_size'].mean():.1f}")
     print(f"Total tokens processed: {results['tokens_processed'].iloc[-1]:,}")
 

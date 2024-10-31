@@ -33,17 +33,14 @@ class DDPGradientStatsHook:
 
     def _clear_state(self):
         self.bucket_sq_norms_small_batch = []
-        #self.bucket_sq_norms_large_batch = []
 
     @staticmethod
     def _hook_fn(self, bucket):
-        #buf = bucket.buffer()
         for g in bucket.gradients():
             if g.numel() != 2:
-                #print(f"Found {g} in bucket")
                 self.bucket_sq_norms_small_batch.append(g.pow(2).sum(dtype=torch.float32))
         fut = torch.distributed.all_reduce(bucket.buffer(), op=torch.distributed.ReduceOp.AVG, async_op=True).get_future()
-        def callback(fut): # don't know what this does tbh
+        def callback(fut):
             return fut.value()[0]
         return fut.then(callback)
 
