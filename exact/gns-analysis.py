@@ -210,7 +210,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description='Analyze GNS metrics from CSV data')
     parser.add_argument('out_dir', type=str, help='Directory containing the CSV files')
-    parser.add_argument('--alpha', type=float, default=0.95, help='EMA decay rate (default: 0.95)')
+    parser.add_argument('--alpha', type=float, default=0.99, help='EMA decay rate (default: 0.95)')
     parser.add_argument('--prefix', type=str, default='train/gns',
                       help='Prefix for GNS metrics in CSV (default: train/gns)')
     parser.add_argument('--no-plots', action='store_true',
