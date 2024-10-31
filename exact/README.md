@@ -99,7 +99,7 @@ python data/openwebtext/prepare.py
 Unlike the original nanoGPT repository, we wanted to demonstrate how this can
 monitor GNS on a single device, so the example code doesn't require DDP. It's
 still possible to run DDP using `torchrun` as the original nanoGPT repository
-but we won't cover that here.
+(see below).
 
 The experiment config is set up to run on a single A10 GPU but any single device
 that is large enough will work (set the `device_name` to get accurate MFU
@@ -134,6 +134,15 @@ GNS for illustration):
 ```bash
 python train.py config/train_cgpt_111M_owt.py --lnclass=fused --out_dir=out-cgpt-openwebtext-bs_schedule --bs_schedule=True
 ```
+
+### DDP
+
+For an example, if we were running on 4 A10 GPUs, the following should work:
+```bash
+torchrun --standalone --nproc_per_node=4 train.py config/train_cgpt_111M_owt.py --gradient_accumulation_steps=16 --lnclass=shim --linearclass=gns --embeddingclass=gns
+```
+The GNS will be logged and may be plotted using `gns-analysis.py`, if "ddp/gns"
+is present in the log CSV it will be reported.
 
 ## Map of the repository
 
