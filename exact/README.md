@@ -12,18 +12,18 @@ existing training loop.
 
 Requirements:
 
-- pytorch
-- numpy
-- datasets (for preparing OpenWebText)
-- tiktoken (for tokenizing OpenWebText)
-- tqdm (for progress bars when preparing OpenWebText)
+- `pytorch`
+- `numpy`
+- `datasets` (for preparing OpenWebText)
+- `tiktoken` (for tokenizing OpenWebText)
+- `tqdm` (for progress bars when preparing OpenWebText)
 
 Optional:
 
-- transformers (for loading checkpoints)
-- pandas (for plotting metrics and analyzing GNS)
-- plotille (for plotting metrics on the command line)
-- wandb (for logging metrics to Weights & Biases)
+- `transformers` (for loading checkpoints)
+- `pandas` (for plotting metrics and analyzing GNS)
+- `plotille` (for plotting metrics on the command line)
+- `wandb` (for logging metrics to Weights & Biases)
 
 ## quick start
 
